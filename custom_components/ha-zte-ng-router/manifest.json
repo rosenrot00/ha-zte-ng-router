@@ -3,6 +3,7 @@
   "name": "ZTE NG Router",
   "version": "0.1.0",
   "documentation": "https://github.com/rosenrot00/ha-zte-ng-router",
+  "issue_tracker": "https://github.com/rosenrot00/ha-zte-ng-router/issues",
   "requirements": [
     "requests>=2.31.0"
   ],
