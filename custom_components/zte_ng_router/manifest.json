@@ -1,0 +1,18 @@
+{
+  "domain": "zte_ng_router",
+  "name": "ZTE NG Router",
+  "version": "0.1.0",
+  "documentation": "https://github.com/rosenrot00/ha-zte-ng-router",
+  "issue_tracker": "https://github.com/rosenrot00/ha-zte-ng-router/issues",
+  "requirements": [
+    "requests>=2.31.0"
+  ],
+  "codeowners": [
+    "@rosenrot00"
+  ],
+  "config_flow": true,
+  "iot_class": "local_polling",
+  "loggers": [
+    "custom_components.zte_ng_router"
+  ]
+}
