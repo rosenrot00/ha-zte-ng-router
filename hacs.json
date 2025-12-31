@@ -1,6 +1,5 @@
 {
   "name": "ZTE NG Router",
-  "domain": "zte_ng_router",
   "homeassistant": "2024.1.0"
   "country": "all",
   "homeassistant": "2024.1.0",
