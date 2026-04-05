@@ -280,6 +280,13 @@ class ZtePausePollingSwitch(SwitchEntity):
 
             coordinator = self._store.get("coordinator")
             coordinator_fast = self._store.get("coordinator_fast")
+            api = self._store.get("api")
+
+            # The router session may have been invalidated by browser activity during
+            # the pause.  Force a re-login before the next coordinator refresh.
+            if api is not None:
+                api.invalidate_session()
+
             if coordinator is not None:
                 await coordinator.async_request_refresh()
             if coordinator_fast is not None:
@@ -311,6 +318,13 @@ class ZtePausePollingSwitch(SwitchEntity):
 
         coordinator = self._store.get("coordinator")
         coordinator_fast = self._store.get("coordinator_fast")
+        api = self._store.get("api")
+
+        # The router session may have been invalidated by browser activity during
+        # the pause.  Force a re-login before the next coordinator refresh.
+        if api is not None:
+            api.invalidate_session()
+
         if coordinator is not None:
             await coordinator.async_request_refresh()
         if coordinator_fast is not None:

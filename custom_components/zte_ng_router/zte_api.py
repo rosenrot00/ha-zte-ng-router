@@ -77,6 +77,10 @@ class ZteRouterApi:
 
         self._auth_lock = asyncio.Lock()
 
+        # API mode: "ubus" (default) or "goform" (auto-detected during login)
+        self._api_mode: str = "ubus"
+        self._goform_session: Optional[aiohttp.ClientSession] = None
+
         # Headers similar to the JS script environment
         self._base_headers = {
             "Content-Type": "application/json;charset=UTF-8",
@@ -332,7 +336,33 @@ class ZteRouterApi:
             _LOGGER.warning("async_init_session GET %s failed: %s", url, exc)
 
     async def async_login(self) -> None:
-        """Perform web_login to ZTE router and store ubus session ID."""
+        """Perform login.
+
+        Try UBUS first for compatibility/performance. If UBUS is unavailable on this
+        firmware (or otherwise fails), always attempt GoForm as fallback.
+        """
+        ubus_exc: Exception | None = None
+
+        try:
+            await self._async_ubus_login()
+            self._api_mode = "ubus"
+            return
+        except Exception as exc:
+            ubus_exc = exc
+            _LOGGER.info("UBUS login failed (%s), trying GoForm fallback", exc)
+
+        try:
+            await self._async_goform_login()
+            return
+        except Exception as goform_exc:
+            if ubus_exc is None:
+                raise RuntimeError(f"GoForm login failed: {goform_exc}") from goform_exc
+            raise RuntimeError(
+                f"Login failed: UBUS={ubus_exc}; GoForm={goform_exc}"
+            ) from goform_exc
+
+    async def _async_ubus_login(self) -> None:
+        """Perform UBUS-based web_login to ZTE router and store ubus session ID."""
 
         # 1) get salt
         salt_req = {
@@ -373,16 +403,341 @@ class ZteRouterApi:
 
         self._session_id = sid
         self._logged_in = True
-        _LOGGER.info("ZTE NG Router login successful")
+        _LOGGER.info("ZTE NG Router UBUS login successful")
+
+    # --------------------------------------------------------------------
+    # GoForm helpers
+    # --------------------------------------------------------------------
+    async def _async_get_goform_session(self) -> aiohttp.ClientSession:
+        """Return (creating if needed) a dedicated aiohttp session with unsafe cookie jar."""
+        if self._goform_session is None:
+            ssl_ctx: bool = False if not self.verify_tls else True
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            jar = aiohttp.CookieJar(unsafe=True)
+            self._goform_session = aiohttp.ClientSession(connector=connector, cookie_jar=jar)
+        return self._goform_session
+
+    async def _async_goform_get(
+        self, cmd: str, extra_params: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """GET /goform/goform_get_cmd_process?cmd=<cmd>&…"""
+        session = await self._async_get_goform_session()
+        params: dict[str, str] = {
+            "isTest": "false",
+            "cmd": cmd,
+            "multi_data": "1",
+            "_": str(int(time.time() * 1000)),
+        }
+        if extra_params:
+            params.update(extra_params)
+        url = f"{self.base_url}/goform/goform_get_cmd_process"
+        headers = {
+            "Referer": f"{self.base_url}/index.html",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            async with session.get(
+                url, params=params, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                return await resp.json(content_type=None)
+        except Exception as exc:
+            _LOGGER.warning("GoForm GET %s failed: %s", cmd, exc)
+            return {}
+
+    async def _async_goform_set(self, data: dict[str, str]) -> dict[str, Any]:
+        """POST /goform/goform_set_cmd_process with URL-encoded form data."""
+        session = await self._async_get_goform_session()
+        url = f"{self.base_url}/goform/goform_set_cmd_process"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Referer": f"{self.base_url}/index.html",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            async with session.post(
+                url, data=data, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                return await resp.json(content_type=None)
+        except Exception as exc:
+            _LOGGER.warning("GoForm POST failed: %s", exc)
+            return {}
+
+    async def _async_goform_init_session(self) -> None:
+        """Load router index page to establish GoForm session cookie."""
+        session = await self._async_get_goform_session()
+        url = f"{self.base_url}/index.html"
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                await resp.read()
+                _LOGGER.debug("GoForm session init: status=%s", resp.status)
+        except Exception as exc:
+            _LOGGER.warning("GoForm session init GET %s failed: %s", url, exc)
+
+    async def _async_goform_login(self) -> None:
+        """Login via GoForm API (SHA256(SHA256(password).upper() + LD))."""
+        import hashlib
+        # 1. Establish session cookie
+        await self._async_goform_init_session()
+        # 2. Get LD nonce
+        ld_resp = await self._async_goform_get("LD")
+        ld = ld_resp.get("LD", "")
+        if not ld:
+            raise RuntimeError("GoForm: LD nonce is empty; cannot login")
+        # 3. Hash: SHA256(SHA256(password).upper() + LD)
+        h1 = hashlib.sha256(self.password.encode("utf-8")).hexdigest().upper()
+        final = hashlib.sha256((h1 + ld).encode("utf-8")).hexdigest().upper()
+        # 4. POST login
+        login_resp = await self._async_goform_set({
+            "isTest": "false",
+            "goformId": "LOGIN",
+            "password": final,
+        })
+        result = login_resp.get("result", "")
+        if result != "0":
+            raise RuntimeError(f"GoForm login failed: result={result!r}")
+        self._logged_in = True
+        self._api_mode = "goform"
+        _LOGGER.info("ZTE GoForm login successful")
+
+    @staticmethod
+    def _goform_has_usable_payload(values: dict[str, Any]) -> bool:
+        """Heuristic to detect empty/invalid GoForm responses.
+
+        Some firmwares return mostly empty objects when the session expired.
+        """
+        probe_keys = (
+            "wa_inner_version",
+            "network_type",
+            "network_provider_fullname",
+            "ppp_status",
+            "network_rmcc",
+            "wifi_chip1_ssid1_ssid",
+        )
+        return any(values.get(k) not in (None, "", "-", "null") for k in probe_keys)
+
+    async def _async_goform_update_all(self) -> dict[str, Any]:
+        """Fetch all router data via GoForm API using SINGLE-field queries.
+        
+        IMPORTANT: GoForm API does NOT support multi-field queries (e.g., "field1,field2").
+        We must query each field individually. To reduce latency, we use asyncio.gather()
+        to make many requests in parallel (10+ concurrent requests).
+        """
+        # Define which fields we need (grouped for documentation)
+        basic_fields = [
+            "network_type", "network_signalbar", "network_provider_fullname",
+            "lte_pci", "lte_rssi", "lte_rsrq", "lte_snr", "network_lte_rsrp",
+            "Z5g_rsrp", "Z5g_rsrq", "Z5g_snr", "Z5g_SINR", "Z5g_rssi",
+            "network_Z5g_PCI", "network_Z5g_CELL_ID", "nr5g_action_channel",
+            "wan_active_channel", "network_lte_ca_pcell_arfcn",
+            "network_lte_ca_pcell_band", "network_lte_ca_pcell_bandwidth",
+            "nr5g_action_band", "nr5g_nsa_bandwidth",
+            "network_rmcc", "network_rmnc",
+            "wifi_onoff_state", "wifi_chip1_ssid1_ssid", "wifi_chip2_ssid1_ssid",
+            "wifi_chip1_ssid1_access_sta_num", "wifi_chip2_ssid1_access_sta_num",
+            "mwan_wanlan1_wan_ipaddr", "mwan_wanlan1_link_state", "mwan_wanlan1_ipv6_wan_ipaddr",
+            "ppp_status", "wan_ipaddr", "ipv6_wan_ipaddr",
+            "hardware_version", "wa_inner_version",
+            "flux_realtime_rx_thrpt", "flux_realtime_tx_thrpt", "flux_realtime_time",
+            "flux_monthly_rx_bytes", "flux_monthly_tx_bytes",
+        ]
+
+        # Query all basic fields in parallel (GoForm API limitation: only single fields work)
+        field_tasks = [self._async_goform_get(field) for field in basic_fields]
+        field_results = await asyncio.gather(*field_tasks, return_exceptions=False)
+
+        # Aggregate results into a single dict
+        main = {}
+        for field_name, result in zip(basic_fields, field_results):
+            if isinstance(result, dict) and field_name in result:
+                main[field_name] = result[field_name]
+            else:
+                main[field_name] = None
+
+        if not self._goform_has_usable_payload(main):
+            raise RuntimeError("GoForm returned no usable payload (session expired or unsupported response)")
+
+        # Query special endpoints
+        lan_resp = await self._async_goform_get("lan_station_list")
+        sms_cap_resp = await self._async_goform_get("sms_capacity_info")
+        sms_msgs_resp = await self._async_goform_get(
+            "sms_data_total",
+            {"page": "0", "data_per_page": "50", "mem_store": "1",
+             "tags": "10", "order_by": "order by id desc"},
+        )
+
+        # Build response structure (same as UBUS update)
+        netinfo: dict[str, Any] = {
+            "network_type": main.get("network_type"),
+            "network_provider_fullname": main.get("network_provider_fullname"),
+            "signalbar": main.get("network_signalbar"),
+            "rmcc": main.get("network_rmcc"),
+            "rmnc": main.get("network_rmnc"),
+            "nr5g_cell_id": main.get("network_Z5g_CELL_ID"),
+            "lte_pci": main.get("lte_pci"),
+            "lte_action_channel": main.get("wan_active_channel") or main.get("network_lte_ca_pcell_arfcn"),
+            "lte_bandwidth": main.get("network_lte_ca_pcell_bandwidth"),
+            "lte_rsrp": main.get("network_lte_rsrp"),
+            "lte_rsrq": main.get("lte_rsrq"),
+            "lte_snr": main.get("lte_snr"),
+            "lte_rssi": main.get("lte_rssi"),
+            "nr5g_pci": main.get("network_Z5g_PCI"),
+            "nr5g_action_channel": main.get("nr5g_action_channel"),
+            "nr5g_bandwidth": main.get("nr5g_nsa_bandwidth"),
+            "nr5g_rsrp": main.get("Z5g_rsrp"),
+            "nr5g_rsrq": main.get("Z5g_rsrq"),
+            "nr5g_snr": main.get("Z5g_SINR") or main.get("Z5g_snr"),
+            "nr5g_rssi": main.get("Z5g_rssi"),
+        }
+        wlan: dict[str, Any] = {
+            "wifi_onoff": main.get("wifi_onoff_state"),
+            "main2g_ssid": main.get("wifi_chip1_ssid1_ssid"),
+            "main5g_ssid": main.get("wifi_chip2_ssid1_ssid"),
+        }
+        wan: dict[str, Any] = {
+            "mwan_wanlan1_wan_ipaddr": main.get("mwan_wanlan1_wan_ipaddr") or main.get("wan_ipaddr"),
+            "mwan_wanlan1_ipv6_wan_ipaddr": main.get("mwan_wanlan1_ipv6_wan_ipaddr") or main.get("ipv6_wan_ipaddr"),
+            "current_wan_status": main.get("ppp_status"),
+            "real_rx_speed": main.get("flux_realtime_rx_thrpt"),
+            "real_tx_speed": main.get("flux_realtime_tx_thrpt"),
+            "real_time": main.get("flux_realtime_time"),
+        }
+        lan_list = lan_resp.get("lan_station_list") if isinstance(lan_resp, dict) else None
+        lan_count = len(lan_list) if isinstance(lan_list, list) else 0
+        try:
+            wifi2g = int(main.get("wifi_chip1_ssid1_access_sta_num") or 0)
+        except (TypeError, ValueError):
+            wifi2g = 0
+        try:
+            wifi5g = int(main.get("wifi_chip2_ssid1_access_sta_num") or 0)
+        except (TypeError, ValueError):
+            wifi5g = 0
+        user_list_num: dict[str, Any] = {
+            "lan_num": lan_count,
+            "wireless_num": wifi2g + wifi5g,
+        }
+        common_config: dict[str, Any] = {
+            "hardware_version": main.get("hardware_version"),
+            "wa_inner_version": main.get("wa_inner_version"),
+        }
+        wwandst: dict[str, Any] = {
+            "real_rx_speed": main.get("flux_realtime_rx_thrpt"),
+            "real_tx_speed": main.get("flux_realtime_tx_thrpt"),
+            "real_time": main.get("flux_realtime_time"),
+        }
+        wwandst_monthly: dict[str, Any] = {
+            "month_rx_bytes": main.get("flux_monthly_rx_bytes"),
+            "month_tx_bytes": main.get("flux_monthly_tx_bytes"),
+        }
+        sms_cap_raw = sms_cap_resp if isinstance(sms_cap_resp, dict) else {}
+        try:
+            nv_used = (
+                int(sms_cap_raw.get("sms_nv_rev_total") or 0)
+                + int(sms_cap_raw.get("sms_nv_send_total") or 0)
+                + int(sms_cap_raw.get("sms_nv_draftbox_total") or 0)
+            )
+        except (TypeError, ValueError):
+            nv_used = 0
+        try:
+            unread = (
+                int(sms_cap_raw.get("sms_nv_rev_total") or 0)
+                + int(sms_cap_raw.get("sms_sim_rev_total") or 0)
+            )
+        except (TypeError, ValueError):
+            unread = 0
+        sms_cap_mapped: dict[str, Any] = {
+            "sms_nv_total": sms_cap_raw.get("sms_nv_total"),
+            "sms_sim_total": sms_cap_raw.get("sms_sim_total"),
+            "sms_nvused_total": str(nv_used),
+            "sms_dev_unread_num": str(unread),
+        }
+        raw_messages = (sms_msgs_resp.get("messages") or []) if isinstance(sms_msgs_resp, dict) else []
+        sms_messages: list[dict[str, Any]] = []
+        for msg in raw_messages:
+            if not isinstance(msg, dict):
+                continue
+            sms_messages.append({
+                "id": msg.get("id"),
+                "number": msg.get("number"),
+                "date": msg.get("date"),
+                "tag": msg.get("tag"),
+                "mem_store": msg.get("mem_store"),
+                "content_raw": msg.get("content"),
+                "content_decoded": self._decode_sms_content(msg.get("content")),
+            })
+
+        bands_summary, total_bw_mhz = self._compute_bands_and_bw(netinfo)
+        return {
+            "netinfo": netinfo,
+            "wlan": wlan,
+            "wifi_main_2g": {},
+            "wifi_main_5g": {},
+            "odu_led": {},
+            "thermal": None,
+            "device": None,
+            "common_config": common_config,
+            "wan": wan,
+            "user_list_num": user_list_num,
+            "wwandst": wwandst,
+            "wwaniface": {},
+            "wwandst_monthly": wwandst_monthly,
+            "sms": {
+                "messages": sms_messages,
+                "latest": sms_messages[0] if sms_messages else None,
+                "capacity": sms_cap_mapped,
+            },
+            "bands_summary": bands_summary,
+            "total_bw_mhz": total_bw_mhz,
+        }
+
+    async def _async_goform_update_fast(self) -> dict[str, Any] | None:
+        """Fetch only fast-changing stats via GoForm API."""
+        rx_resp, tx_resp, time_resp = await asyncio.gather(
+            self._async_goform_get("flux_realtime_rx_thrpt"),
+            self._async_goform_get("flux_realtime_tx_thrpt"),
+            self._async_goform_get("flux_realtime_time"),
+        )
+        if not any(
+            node.get(key) not in (None, "", "-", "null")
+            for node, key in (
+                (rx_resp, "flux_realtime_rx_thrpt"),
+                (tx_resp, "flux_realtime_tx_thrpt"),
+                (time_resp, "flux_realtime_time"),
+            )
+        ):
+            raise RuntimeError("GoForm fast update returned no usable values")
+        return {
+            "wan": {"real_time": time_resp.get("flux_realtime_time")},
+            "wwandst": {
+                "real_rx_speed": rx_resp.get("flux_realtime_rx_thrpt"),
+                "real_tx_speed": tx_resp.get("flux_realtime_tx_thrpt"),
+            },
+        }
 
     async def _async_ensure_logged_in(self, *, force: bool = False) -> None:
-        """Ensure we have a valid ubus session.
+        """Ensure we have a valid session (UBUS or GoForm).
 
         Uses a lock to prevent concurrent logins and avoids repeated logins within the same update cycle.
         """
         async with self._auth_lock:
-            if not force and self._logged_in and self._session_id:
-                return
+            if not force and self._logged_in:
+                # For UBUS mode also require a session_id
+                if self._api_mode != "goform" and not self._session_id:
+                    pass  # fall through to login
+                else:
+                    return
+
+            # Discard the GoForm session so _async_goform_login() starts with a
+            # completely fresh cookie jar.  Stale cookies from a previous session
+            # prevent a successful re-login after a browser login has invalidated
+            # the old session.
+            if force and self._goform_session is not None:
+                try:
+                    await self._goform_session.close()
+                except Exception:
+                    pass
+                self._goform_session = None
 
             await self.async_init_session()
             await self.async_login()
@@ -399,6 +754,14 @@ class ZteRouterApi:
         retry_on_connreset_104: bool = True,
     ) -> dict:
         """Call ubus. If access denied (-32002), try a re-login and retry once."""
+
+        if self._api_mode == "goform" and not self._session_id:
+            _LOGGER.debug(
+                "Skipping ubus call in goform mode without ubus session: %s.%s",
+                call.get("service"),
+                call.get("method"),
+            )
+            return {"success": False, "data": None}
 
         if session_id is None:
             # Lazily login only when we actually need an authenticated call.
@@ -488,10 +851,17 @@ class ZteRouterApi:
                     retry_on_connreset_104=False,
                 )
 
+            # Non-104 network error – mark session as stale so the next poll
+            # triggers a re-login (e.g. router sent HTML redirect after a browser
+            # login invalidated the HA session).
+            self._logged_in = False
+            self._session_id = None
             return {"success": False, "data": None}
 
         if not isinstance(res_list, list) or not res_list:
-            _LOGGER.warning("Invalid JSON from ubus")
+            _LOGGER.warning("Invalid JSON from ubus – marking session as stale for re-login")
+            self._logged_in = False
+            self._session_id = None
             return {"success": False, "data": None}
 
         res0 = res_list[0]
@@ -680,10 +1050,17 @@ class ZteRouterApi:
                     retry_on_access_denied=retry_on_access_denied,
                 )
 
+            # Non-104 network error – mark session as stale so the next poll
+            # triggers a re-login (e.g. router sent HTML redirect after a browser
+            # login invalidated the HA session).
+            self._logged_in = False
+            self._session_id = None
             return [{"success": False, "data": None, "error": {"message": str(exc)}} for _ in calls]
 
         if not isinstance(res_list, list):
-            _LOGGER.warning("Invalid JSON from ubus batch")
+            _LOGGER.warning("Invalid JSON from ubus batch – marking session as stale for re-login")
+            self._logged_in = False
+            self._session_id = None
             return [{"success": False, "data": None, "error": {"message": "invalid_json"}} for _ in calls]
 
         # Prepare output list
@@ -731,6 +1108,22 @@ class ZteRouterApi:
                 ", ".join(failed),
             )
     
+    def invalidate_session(self) -> None:
+        """Mark the current session as invalid to force a re-login on the next request.
+
+        Call this whenever an external action (e.g. browser login, pause-polling end)
+        may have invalidated the router session so that the next coordinator refresh
+        will always perform a fresh login instead of reusing stale credentials.
+        For GoForm mode the dedicated session is also discarded so that a fresh
+        cookie jar is used on the next login attempt.
+        """
+        self._logged_in = False
+        self._session_id = None
+        # GoForm: schedule session teardown (fire-and-forget; no await here
+        # because this is a sync method called from sync context).
+        # The session will be lazily recreated by _async_get_goform_session().
+        self._goform_session = None
+
     def build_ubus_call(
         self,
         service: str,
@@ -831,8 +1224,17 @@ class ZteRouterApi:
         """
 
         # Ensure we have an authenticated session.
-        if not self._session_id or not self._logged_in:
+        if not self._logged_in:
             await self._async_ensure_logged_in()
+
+        if self._api_mode == "goform":
+            try:
+                return await self._async_goform_update_fast()
+            except Exception as exc:
+                _LOGGER.warning("GoForm fast update failed, retrying with re-login: %s", exc)
+                self._logged_in = False
+                await self._async_ensure_logged_in(force=True)
+                return await self._async_goform_update_fast()
 
         batch_calls = [
             {"service": "zwrt_router.api", "method": "router_get_status"},
@@ -863,6 +1265,18 @@ class ZteRouterApi:
     # --------------------------------------------------------------------
     async def async_update_all(self) -> dict[str, Any]:
         """Fetch all relevant router data for Home Assistant in one go."""
+
+        if not self._logged_in:
+            await self._async_ensure_logged_in()
+
+        if self._api_mode == "goform":
+            try:
+                return await self._async_goform_update_all()
+            except Exception as exc:
+                _LOGGER.warning("GoForm full update failed, retrying with re-login: %s", exc)
+                self._logged_in = False
+                await self._async_ensure_logged_in(force=True)
+                return await self._async_goform_update_all()
 
         core_batch_calls = [
             {"service": "zte_nwinfo_api", "method": "nwinfo_get_netinfo"},
