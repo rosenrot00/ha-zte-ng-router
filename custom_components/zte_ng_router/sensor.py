@@ -13,7 +13,7 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
 )
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -55,6 +55,7 @@ SENSOR_DEFS = [
     ("lte_rsrq", "LTE RSRQ", None, "dB", SensorStateClass.MEASUREMENT),
     ("lte_sinr", "LTE SINR", None, "dB", SensorStateClass.MEASUREMENT),
     ("lte_rssi", "LTE RSSI", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("lte_primary_band", "LTE Primary Band", None, None, None),
 
     # NR / 5G metrics
     ("nr_pci", "NR PCI", None, None, None),
@@ -63,11 +64,15 @@ SENSOR_DEFS = [
     ("nr_rsrq", "NR RSRQ", None, "dB", SensorStateClass.MEASUREMENT),
     ("nr_sinr", "NR SINR", None, "dB", SensorStateClass.MEASUREMENT),
     ("nr_rssi", "NR RSSI", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("nr_active_band", "NR Active Band", None, None, None),
 
     # WAN / system
     ("wan_ipv4", "WAN IPv4", None, None, None),
     ("wan_ipv6", "WAN IPv6", None, None, None),
     ("wan_status", "WAN Status", None, None, None),
+    ("wan_link_state", "WAN Link State", None, None, None),
+    ("modem_main_state", "Modem Main State", None, None, None),
+    ("radio_off", "Radio Off", None, None, None),
     ("connected_lan_devices", "Connected LAN Devices", None, None, SensorStateClass.MEASUREMENT),
     ("connected_wifi_devices", "Connected WiFi Devices", None, None, SensorStateClass.MEASUREMENT),
     ("download_rate", "Download Rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
@@ -87,6 +92,12 @@ SENSOR_DEFS = [
     ("wa_inner_version", "WA Inner Version", None, None, None),
     ("cpu_temp", "CPU Temperature", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
+    ("modem_temp", "Modem Temperature", SensorDeviceClass.TEMPERATURE,
+     UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
+    ("modem_5g_temp", "5G Modem Temperature", SensorDeviceClass.TEMPERATURE,
+     UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
+    ("pa_temp_level", "PA Temp Level", None, "%", SensorStateClass.MEASUREMENT),
+    ("tj_temp_level", "TJ Temp Level", None, "%", SensorStateClass.MEASUREMENT),
     # Uptime in seconds – Home Assistant can convert/display as hours/days
     ("uptime", "Device Uptime", SensorDeviceClass.DURATION,
      "s", SensorStateClass.MEASUREMENT),
@@ -107,6 +118,18 @@ def _as_number(value: Any) -> Any:
         v = value.strip()
         if v == "" or v == "-":
             return None
+        vl = v.lower()
+        # Some firmwares return numeric values in hex (e.g. LTE PCI as "7c").
+        if vl.startswith("0x"):
+            try:
+                return int(vl, 16)
+            except ValueError:
+                return None
+        if "." not in v and any(c in "abcdefABCDEF" for c in v):
+            try:
+                return int(v, 16)
+            except ValueError:
+                return None
         try:
             return float(v)
         except ValueError:
@@ -122,6 +145,19 @@ def _to_bit_per_s(value: Any) -> Any:
     if v is None:
         return None
     return int(v * 8.0)
+
+
+def _as_temperature(value: Any) -> Any:
+    """Normalize temperature and hide known invalid modem sentinel values.
+
+    Some ZTE firmwares report -40 when a temperature sensor is not available.
+    """
+    v = _as_number(value)
+    if v is None:
+        return None
+    if abs(float(v) + 40.0) < 0.001:
+        return None
+    return v
 
 
 def _bytes_counter(value: Any) -> Any:
@@ -183,6 +219,75 @@ def _truncate_text(value: Any, max_len: int = 240) -> str | None:
     if len(txt) <= max_len:
         return txt
     return f"{txt[:max_len - 3]}..."
+
+
+DIAGNOSTIC_SENSOR_KEYS = {
+    "rmcc",
+    "rmnc",
+    "lac_code",
+    "lte_band_lock",
+    "gw_band_lock",
+    "wan_link_state",
+    "modem_main_state",
+    "radio_off",
+    "hardware_version",
+    "wa_inner_version",
+    "lte_primary_band",
+    "nr_active_band",
+    "modem_temp",
+    "modem_5g_temp",
+    "pa_temp_level",
+    "tj_temp_level",
+}
+
+
+SENSOR_DESCRIPTIONS: dict[str, str] = {
+    "rmcc": "Mobile country code reported by the serving network.",
+    "rmnc": "Mobile network code reported by the serving network.",
+    "lac_code": "Location area code of the serving LTE/NR network.",
+    "wa_inner_version": "Internal router software/firmware build version.",
+    "hardware_version": "Router hardware revision reported by the device.",
+    "wan_status": "Current WAN connection state reported by the modem/router stack.",
+    "wan_link_state": "Physical/logical WAN link state of the modem uplink.",
+    "modem_main_state": "Modem state machine status (e.g. init, registered, connected).",
+    "radio_off": "Indicates whether cellular radio is disabled (1) or enabled (0).",
+    "lte_band_lock": "Raw LTE band lock bitmap/value from router firmware.",
+    "gw_band_lock": "Raw 2G/3G band lock bitmap/value from router firmware.",
+    "lte_primary_band": "Primary LTE serving band.",
+    "nr_active_band": "Active NR (5G) band.",
+    "pa_temp_level": "Power amplifier thermal level indicator.",
+    "tj_temp_level": "Junction temperature level indicator.",
+}
+
+
+SENSOR_VALUE_LEGENDS: dict[str, dict[str, str]] = {
+    "radio_off": {
+        "true": "Radio is disabled",
+        "false": "Radio is enabled",
+        "1": "Radio is disabled",
+        "0": "Radio is enabled",
+    },
+    "wan_status": {
+        "ppp_connected": "Data session connected",
+        "ppp_connecting": "Data session is connecting",
+        "ppp_disconnected": "Data session disconnected",
+        "ppp_disconnecting": "Data session is disconnecting",
+        "ipv4_connected": "IPv4 connected",
+        "ipv6_connected": "IPv6 connected",
+        "ipv4_ipv6_connected": "IPv4 + IPv6 connected",
+        "disconnected": "No data session",
+    },
+    "wan_link_state": {
+        "link_ok": "Ethernet/WAN link is up",
+        "link_down": "Ethernet/WAN link is down",
+    },
+    "modem_main_state": {
+        "modem_init_complete": "Modem initialized",
+        "modem_waitpin": "SIM PIN required",
+        "modem_waitpuk": "SIM PUK required",
+        "modem_sim_undetected": "SIM card not detected",
+    },
+}
 
 
 def _extract_value(data: dict[str, Any], key: str) -> Any:
@@ -285,6 +390,8 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         return _as_number(netinfo.get("lte_snr"))
     if key == "lte_rssi":
         return _as_number(netinfo.get("lte_rssi"))
+    if key == "lte_primary_band":
+        return _as_text(netinfo.get("lte_action_band"))
 
     # NR / 5G metrics
     if key == "nr_pci":
@@ -299,6 +406,8 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         return _as_number(netinfo.get("nr5g_snr"))
     if key == "nr_rssi":
         return _as_number(netinfo.get("nr5g_rssi"))
+    if key == "nr_active_band":
+        return _as_text(netinfo.get("nr5g_action_band"))
 
     # WAN / system
     if key == "wan_ipv4":
@@ -317,6 +426,18 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
 
     if key == "wan_status":
         return _as_text(wan.get("mwan_wanlan1_status")) or _as_text(wan.get("current_wan_status"))
+
+    if key == "wan_link_state":
+        return _as_text(wan.get("mwan_wanlan1_link_state"))
+
+    if key == "modem_main_state":
+        return _as_text(wan.get("lte_connect_status"))
+
+    if key == "radio_off":
+        v = _as_text(wan.get("radio_off"))
+        if v in ("0", "1"):
+            return v == "1"
+        return v
 
     if key == "connected_lan_devices":
         lan_num = _as_number(user_list_num.get("lan_num"))
@@ -405,7 +526,19 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         return common_config.get("wa_inner_version")
 
     if key == "cpu_temp":
-        return _as_number(thermal.get("cpuss_temp"))
+        return _as_temperature(thermal.get("cpuss_temp"))
+
+    if key == "modem_temp":
+        return _as_temperature(thermal.get("pm_sensor_mdm"))
+
+    if key == "modem_5g_temp":
+        return _as_temperature(thermal.get("pm_modem_5g"))
+
+    if key == "pa_temp_level":
+        return _as_number(thermal.get("therm_pa_level"))
+
+    if key == "tj_temp_level":
+        return _as_number(thermal.get("therm_tj_level"))
 
     if key == "uptime":
         # device_uptime is in seconds – keep it numeric, HA handles display
@@ -444,6 +577,7 @@ async def async_setup_entry(
                 device_class=dev_class,
                 unit=unit,
                 state_class=state_class,
+                entity_category=(EntityCategory.DIAGNOSTIC if key in DIAGNOSTIC_SENSOR_KEYS else None),
             )
         )
 
@@ -465,6 +599,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         device_class: SensorDeviceClass | None,
         unit: str | None,
         state_class: SensorStateClass | None,
+        entity_category: EntityCategory | None,
     ) -> None:
         super().__init__(coordinator)
         self._key = key
@@ -487,6 +622,8 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
             self._attr_native_unit_of_measurement = unit
         if state_class is not None:
             self._attr_state_class = state_class
+        if entity_category is not None:
+            self._attr_entity_category = entity_category
 
     @property
     def native_value(self) -> Any:
@@ -495,6 +632,16 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        attrs: dict[str, Any] = {}
+
+        description = SENSOR_DESCRIPTIONS.get(self._key)
+        if description:
+            attrs["description"] = description
+
+        legend = SENSOR_VALUE_LEGENDS.get(self._key)
+        if legend:
+            attrs["value_legend"] = legend
+
         if self._key not in {
             "sms_count",
             "sms_latest",
@@ -503,7 +650,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
             "sms_sim_total",
             "sms_nv_used_total",
         }:
-            return None
+            return attrs or None
 
         data: dict[str, Any] = self.coordinator.data or {}
         sms = data.get("sms") or {}
@@ -513,7 +660,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
             messages = []
 
         latest = sms.get("latest") if isinstance(sms.get("latest"), dict) else None
-        attrs: dict[str, Any] = {
+        sms_attrs: dict[str, Any] = {
             "total_messages": len(messages),
             "capacity_sms_nv_total": capacity.get("sms_nv_total"),
             "capacity_sms_sim_total": capacity.get("sms_sim_total"),
@@ -529,11 +676,11 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         }
 
         if latest:
-            attrs["latest_id"] = latest.get("id")
-            attrs["latest_number"] = latest.get("number")
-            attrs["latest_tag"] = latest.get("tag")
-            attrs["latest_date"] = _parse_sms_date(latest.get("date")) or latest.get("date")
-            attrs["latest_text"] = _truncate_text(latest.get("content_decoded"), 500)
+            sms_attrs["latest_id"] = latest.get("id")
+            sms_attrs["latest_number"] = latest.get("number")
+            sms_attrs["latest_tag"] = latest.get("tag")
+            sms_attrs["latest_date"] = _parse_sms_date(latest.get("date")) or latest.get("date")
+            sms_attrs["latest_text"] = _truncate_text(latest.get("content_decoded"), 500)
 
         # Keep only a compact preview in attributes.
         preview: list[dict[str, Any]] = []
@@ -549,5 +696,6 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
                     "text": _truncate_text(msg.get("content_decoded"), 140),
                 }
             )
-        attrs["recent_messages"] = preview
+        sms_attrs["recent_messages"] = preview
+        attrs.update(sms_attrs)
         return attrs
