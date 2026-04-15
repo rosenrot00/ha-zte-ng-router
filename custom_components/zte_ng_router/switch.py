@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -62,12 +63,12 @@ SWITCH_DEFS: list[ZteActionSwitchDef] = [
         state_key="wifi_onoff",
         on_value="1",
         off_value="0",
-        # master state from zwrt_wlan/report (already stored as coordinator.data["wlan"])
-        get_path=lambda data: data.get("wlan", {}),
+        # WebUI reads this master switch from UCI wireless.zte_mbb, not report().
+        get_path=lambda data: data.get("wifi_module") or data.get("wlan", {}),
         turn_on={
             "service": "zwrt_wlan",
             "method": "set",
-            "params": {"zte_mbb": {"wifi_onoff": "1"}},
+            "params": {"zte_mbb": {"wifi_onoff": "1", "lbd": "1", "mlo": "0"}},
         },
         turn_off={
             "service": "zwrt_wlan",
@@ -197,18 +198,18 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
         # Mobile data state in WebUI is derived from WAN connect status, not get_wwaniface.enable.
         if self._def.key == "mobile_data":
             wan = data.get("wan") or {}
-            status = str(wan.get("current_wan_status") or wan.get("lte_connect_status") or "")
-            return status in {
-                "ipv4_connected",
-                "ipv6_connected",
-                "ipv4_ipv6_connected",
-                "ppp_connected",
-                "connected",
-            }
+            wwaniface = data.get("wwaniface") or {}
+            status = str(
+                wan.get("current_wan_status")
+                or wan.get("lte_connect_status")
+                or wwaniface.get("connect_status")
+                or ""
+            )
+            return status in {"ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"}
 
         # If WiFi master is OFF, force band switches to show OFF
         if self._def.key in ("wifi_main_2g", "wifi_main_5g"):
-            wifi_onoff = (data.get("wlan") or {}).get("wifi_onoff")
+            wifi_onoff = ((data.get("wifi_module") or data.get("wlan")) or {}).get("wifi_onoff")
             if str(wifi_onoff) != "1":
                 return False
 
@@ -224,19 +225,115 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.info("Turning ON ZTE switch: %s", self._def.key)
-        ok = await self._api.async_execute_action_def(self._def.turn_on)
+        action = self._action_for_turn_on()
+        ok = await self._api.async_execute_action_def(action)
         if ok:
-            await self.coordinator.async_request_refresh()
+            if not self._apply_optimistic_state(action):
+                await self.coordinator.async_request_refresh()
         else:
             _LOGGER.warning("Failed to turn ON ZTE switch: %s", self._def.key)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.info("Turning OFF ZTE switch: %s", self._def.key)
-        ok = await self._api.async_execute_action_def(self._def.turn_off)
+        action = self._action_for_turn_off()
+        ok = await self._api.async_execute_action_def(action)
         if ok:
-            await self.coordinator.async_request_refresh()
+            if not self._apply_optimistic_state(action):
+                await self.coordinator.async_request_refresh()
         else:
             _LOGGER.warning("Failed to turn OFF ZTE switch: %s", self._def.key)
+
+    def _apply_optimistic_state(self, action: dict[str, Any]) -> bool:
+        """Update HA state from a successful write without immediately polling."""
+        if self._def.key == "mobile_data":
+            return False
+
+        data = deepcopy(self.coordinator.data or {})
+        params = action.get("params") or {}
+
+        if self._def.key == "wifi_master":
+            value = (params.get("zte_mbb") or {}).get("wifi_onoff")
+        elif self._def.key in ("wifi_main_2g", "wifi_main_5g"):
+            section_name = self._def.key.removeprefix("wifi_")
+            value = (params.get(section_name) or {}).get(self._def.state_key)
+        else:
+            value = params.get(self._def.state_key)
+
+        if value is None:
+            return False
+
+        node = self._def.get_path(data)
+        if not isinstance(node, dict):
+            return False
+
+        node[self._def.state_key] = str(value)
+        if self._def.key == "odu_led" and params.get("offtime") is not None:
+            node["offtime"] = str(params["offtime"])
+
+        self.coordinator.async_set_updated_data(data)
+        return True
+
+    def _action_for_turn_on(self) -> dict[str, Any]:
+        """Build a switch ON action without mutating the shared definition."""
+        action = deepcopy(self._def.turn_on)
+
+        if self._def.key in ("wifi_main_2g", "wifi_main_5g"):
+            return self._action_with_wifi_band_metadata(action)
+
+        if self._def.key == "odu_led":
+            self._apply_led_offtime(action)
+
+        if self._def.key != "wifi_master":
+            return action
+
+        data = self.coordinator.data or {}
+        wifi_module = data.get("wifi_module") or {}
+        wlan = data.get("wlan") or {}
+        zte_mbb = action.setdefault("params", {}).setdefault("zte_mbb", {})
+
+        # WebUI sends lbd/mlo with wifi_onoff=1. Preserve current values when
+        # reported, otherwise use the same defaults observed from the browser.
+        lbd = wifi_module.get("lbd") or wlan.get("lbd_enable") or wlan.get("lbd") or zte_mbb.get("lbd") or "1"
+        mlo = wifi_module.get("mlo") or wlan.get("mlo_enable") or wlan.get("mlo") or zte_mbb.get("mlo") or "0"
+
+        zte_mbb["lbd"] = str(lbd) if str(lbd) in {"0", "1"} else "1"
+        zte_mbb["mlo"] = str(mlo) if str(mlo) in {"0", "1"} else "0"
+        return action
+
+    def _action_for_turn_off(self) -> dict[str, Any]:
+        """Build a switch OFF action without mutating the shared definition."""
+        action = deepcopy(self._def.turn_off)
+
+        if self._def.key in ("wifi_main_2g", "wifi_main_5g"):
+            return self._action_with_wifi_band_metadata(action)
+
+        if self._def.key == "odu_led":
+            self._apply_led_offtime(action)
+
+        return action
+
+    def _apply_led_offtime(self, action: dict[str, Any]) -> None:
+        """Preserve LED auto-off time already present in coordinator data."""
+        node = self._def.get_path(self.coordinator.data or {}) or {}
+        offtime = node.get("offtime")
+        if offtime is not None and offtime != "":
+            action.setdefault("params", {})["offtime"] = str(offtime)
+
+    def _action_with_wifi_band_metadata(self, action: dict[str, Any]) -> dict[str, Any]:
+        """Match WebUI AP switch payload for main_2g/main_5g toggles."""
+        section_name = self._def.key.removeprefix("wifi_")
+        params = action.setdefault("params", {})
+        section = params.setdefault(section_name, {})
+        node = self._def.get_path(self.coordinator.data or {}) or {}
+
+        section["isTest"] = False
+        for key in ("qrImageShow", "wifiSyncparasFlag"):
+            value = node.get(key)
+            if value is not None and value != "":
+                section[key] = str(value)
+
+        params.setdefault("source_module", "web")
+        return action
 
 
 class ZtePausePollingSwitch(SwitchEntity):
@@ -271,6 +368,55 @@ class ZtePausePollingSwitch(SwitchEntity):
         pause_until: datetime | None = self._store.get("pause_until")
         return pause_until is not None and dt_util.utcnow() < pause_until
 
+    def _pause_coordinator(self, key: str) -> None:
+        """Stop a coordinator's scheduled polling until explicitly resumed."""
+        coordinator = self._store.get(key)
+        if coordinator is None:
+            return
+
+        original_intervals = self._store.setdefault("_pause_original_intervals", {})
+        original_intervals.setdefault(key, coordinator.update_interval)
+        coordinator.update_interval = None
+
+        unschedule = getattr(coordinator, "_unschedule_refresh", None)
+        if callable(unschedule):
+            unschedule()
+            return
+
+        unsub_refresh = getattr(coordinator, "_unsub_refresh", None)
+        if callable(unsub_refresh):
+            unsub_refresh()
+            setattr(coordinator, "_unsub_refresh", None)
+
+    async def _resume_coordinator(self, key: str) -> None:
+        """Restore a coordinator's polling interval and trigger one fresh update."""
+        coordinator = self._store.get(key)
+        if coordinator is None:
+            return
+
+        original_intervals = self._store.get("_pause_original_intervals") or {}
+        interval = original_intervals.get(key)
+        if interval is not None:
+            coordinator.update_interval = interval
+
+        await coordinator.async_request_refresh()
+
+    def _pause_polling(self) -> None:
+        self._pause_coordinator("coordinator")
+        self._pause_coordinator("coordinator_fast")
+
+    async def _resume_polling(self) -> None:
+        api = self._store.get("api")
+
+        # The router session may have been invalidated by browser activity during
+        # the pause. Force a re-login before the next coordinator refresh.
+        if api is not None:
+            api.invalidate_session()
+
+        await self._resume_coordinator("coordinator")
+        await self._resume_coordinator("coordinator_fast")
+        self._store.pop("_pause_original_intervals", None)
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         # Cancel any existing auto-off timer
         if self._unsub_auto_off is not None:
@@ -278,38 +424,17 @@ class ZtePausePollingSwitch(SwitchEntity):
             self._unsub_auto_off = None
 
         self._store["pause_until"] = dt_util.utcnow() + timedelta(minutes=5)
+        self._pause_polling()
 
         async def _auto_off(_now) -> None:
             # Auto-resume polling after 5 minutes
             self._store["pause_until"] = None
             self._unsub_auto_off = None
-
-            coordinator = self._store.get("coordinator")
-            coordinator_fast = self._store.get("coordinator_fast")
-            api = self._store.get("api")
-
-            # The router session may have been invalidated by browser activity during
-            # the pause.  Force a re-login before the next coordinator refresh.
-            if api is not None:
-                api.invalidate_session()
-
-            if coordinator is not None:
-                await coordinator.async_request_refresh()
-            if coordinator_fast is not None:
-                await coordinator_fast.async_request_refresh()
-
+            await self._resume_polling()
             self.async_write_ha_state()
 
         # Schedule auto-off
         self._unsub_auto_off = async_call_later(self.hass, 5 * 60, _auto_off)
-
-        # Request refresh; update functions will skip real polling while paused
-        coordinator = self._store.get("coordinator")
-        coordinator_fast = self._store.get("coordinator_fast")
-        if coordinator is not None:
-            await coordinator.async_request_refresh()
-        if coordinator_fast is not None:
-            await coordinator_fast.async_request_refresh()
 
         self.async_write_ha_state()
 
@@ -321,20 +446,7 @@ class ZtePausePollingSwitch(SwitchEntity):
 
         # Resume polling immediately
         self._store["pause_until"] = None
-
-        coordinator = self._store.get("coordinator")
-        coordinator_fast = self._store.get("coordinator_fast")
-        api = self._store.get("api")
-
-        # The router session may have been invalidated by browser activity during
-        # the pause.  Force a re-login before the next coordinator refresh.
-        if api is not None:
-            api.invalidate_session()
-
-        if coordinator is not None:
-            await coordinator.async_request_refresh()
-        if coordinator_fast is not None:
-            await coordinator_fast.async_request_refresh()
+        await self._resume_polling()
 
         self.async_write_ha_state()
 

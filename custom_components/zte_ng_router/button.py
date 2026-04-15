@@ -33,7 +33,7 @@ BUTTON_DEFS: list[ZteActionButtonDef] = [
         action={
             "service": "zwrt_mc.device.manager",
             "method": "device_reboot",
-            "params": {"moduleName": "zte_web"},
+            "params": {"moduleName": "web"},
         },
     ),
     ZteActionButtonDef(
@@ -110,6 +110,8 @@ class ZteActionButton(CoordinatorEntity, ButtonEntity):
             ok = await self._api.async_send_sms(number=number, message=message)
             if not ok:
                 _LOGGER.warning("ZTE action button failed: %s", self._btn_def.key)
+            else:
+                await self.coordinator.async_request_refresh()
             return
 
         ok = await self._api.async_execute_action_def(self._btn_def.action)
