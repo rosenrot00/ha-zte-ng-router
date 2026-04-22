@@ -22,6 +22,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME
 
@@ -97,17 +98,15 @@ SENSOR_DEFS = [
     ("sms_sim_total", "SMS SIM Total", None, None, SensorStateClass.MEASUREMENT),
     ("sms_nv_used_total", "SMS NV Used", None, None, SensorStateClass.MEASUREMENT),
     ("sms_latest", "Latest SMS", None, None, None),
-    # Connected time in seconds (session duration) – Home Assistant can display as h/m
-    ("connected_time", "Connected Time", SensorDeviceClass.DURATION,
-     "s", SensorStateClass.MEASUREMENT),
+    ("connected_time", "Connected Since", SensorDeviceClass.TIMESTAMP,
+     None, None),
     ("hardware_version", "Hardware Version", None, None, None),
     ("wa_inner_version", "WA Inner Version", None, None, None),
     ("cpu_usage", "CPU Usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
     ("cpu_temp", "CPU Temperature", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
-    # Uptime in seconds – Home Assistant can convert/display as hours/days
-    ("uptime", "Device Uptime", SensorDeviceClass.DURATION,
-     "s", SensorStateClass.MEASUREMENT),
+    ("uptime", "Device Started", SensorDeviceClass.TIMESTAMP,
+     None, None),
 ]
 
 
@@ -367,6 +366,14 @@ def _truncate_text(value: Any, max_len: int = 240) -> str | None:
     if len(txt) <= max_len:
         return txt
     return f"{txt[:max_len - 3]}..."
+
+
+def _seconds_ago_to_datetime(value: Any) -> datetime | None:
+    """Convert a router-reported duration in seconds to an aware UTC datetime."""
+    seconds = _as_number(value)
+    if seconds is None or seconds < 0:
+        return None
+    return dt_util.utcnow() - timedelta(seconds=float(seconds))
 
 
 def _extract_value(data: dict[str, Any], key: str) -> Any:
@@ -680,12 +687,12 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         return number
 
     if key == "connected_time":
-        # Prefer router_get_status.real_time if present, otherwise use zwrt_data.get_wwandst(type=4).real_time
+        # Represent the current session as the timestamp when the connection started.
         v = wan.get("real_time")
         if v in (None, "", "-"):
             wwandst = data.get("wwandst") or {}
             v = wwandst.get("real_time")
-        return _as_number(v)
+        return _seconds_ago_to_datetime(v)
 
     if key == "hardware_version":
         return common_config.get("hardware_version")
@@ -708,8 +715,7 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         return _as_number(thermal.get("cpuss_temp"))
 
     if key == "uptime":
-        # device_uptime is in seconds – keep it numeric, HA handles display
-        return _as_number(device.get("device_uptime"))
+        return _seconds_ago_to_datetime(device.get("device_uptime"))
 
     return None
 
