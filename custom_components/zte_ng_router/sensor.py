@@ -376,6 +376,26 @@ def _seconds_ago_to_datetime(value: Any) -> datetime | None:
     return dt_util.utcnow() - timedelta(seconds=float(seconds))
 
 
+def _connected_session_seconds(data: dict[str, Any]) -> float | None:
+    """Return current connection duration in seconds only while WAN is connected."""
+    wan = data.get("wan") or {}
+    status = _as_text(wan.get("mwan_wanlan1_status")) or _as_text(wan.get("current_wan_status"))
+    if status not in {"ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"}:
+        return None
+
+    value = wan.get("real_time")
+    if value in (None, "", "-"):
+        wwandst = data.get("wwandst") or {}
+        value = wwandst.get("real_time")
+    return _as_number(value)
+
+
+def _device_uptime_seconds(data: dict[str, Any]) -> float | None:
+    """Return device uptime in seconds."""
+    device = data.get("device") or {}
+    return _as_number(device.get("device_uptime"))
+
+
 def _extract_value(data: dict[str, Any], key: str) -> Any:
     """Map a logical key to a value inside the aggregated API data."""
     netinfo = data.get("netinfo") or {}
@@ -774,6 +794,8 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self._key = key
+        self._stable_timestamp: datetime | None = None
+        self._last_relative_seconds: float | None = None
 
         # Entity name: "<Router name> <Sensor name>"
         self._attr_name = f"{router_name} {name}"
@@ -799,7 +821,34 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         data: dict[str, Any] = self.coordinator.data or {}
+        if self._key in {"connected_time", "uptime"}:
+            return self._stable_relative_timestamp(data)
         return _extract_value(data, self._key)
+
+    def _stable_relative_timestamp(self, data: dict[str, Any]) -> datetime | None:
+        """Keep timestamp sensors stable until the underlying session really resets."""
+        if self._key == "connected_time":
+            seconds = _connected_session_seconds(data)
+            tolerance = 5.0
+        else:
+            seconds = _device_uptime_seconds(data)
+            tolerance = 10.0
+
+        if seconds is None:
+            self._stable_timestamp = None
+            self._last_relative_seconds = None
+            return None
+
+        seconds = float(seconds)
+        if (
+            self._stable_timestamp is None
+            or self._last_relative_seconds is None
+            or seconds + tolerance < self._last_relative_seconds
+        ):
+            self._stable_timestamp = dt_util.utcnow() - timedelta(seconds=seconds)
+
+        self._last_relative_seconds = seconds
+        return self._stable_timestamp
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
