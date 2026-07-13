@@ -35,28 +35,35 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for ZTE NG Router."""
 
     VERSION = 1
+    options_flow_reloads = True
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle the initial step where the user enters basic config."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
             host = user_input[CONF_HOST]
             name = user_input[CONF_NAME]
+            scan_interval = user_input[CONF_SCAN_INTERVAL]
 
             # Avoid duplicate configurations for the same host
             await self.async_set_unique_id(f"zte_ng_router_{host}")
             self._abort_if_unique_id_configured()
 
-            return self.async_create_entry(
-                title=name,
-                data={
-                    CONF_NAME: name,
-                    CONF_HOST: host,
-                    CONF_PASSWORD: user_input[CONF_PASSWORD],
-                    CONF_ROUTER_TYPE: user_input[CONF_ROUTER_TYPE],
-                    CONF_VERIFY_TLS: user_input[CONF_VERIFY_TLS],
-                    CONF_SCAN_INTERVAL: user_input[CONF_SCAN_INTERVAL],
-                },
-            )
+            if scan_interval < MIN_SCAN_INTERVAL or scan_interval > MAX_SCAN_INTERVAL:
+                errors["base"] = "invalid_scan_interval"
+            else:
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_NAME: name,
+                        CONF_HOST: host,
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                        CONF_ROUTER_TYPE: user_input[CONF_ROUTER_TYPE],
+                        CONF_VERIFY_TLS: user_input[CONF_VERIFY_TLS],
+                        CONF_SCAN_INTERVAL: scan_interval,
+                    },
+                )
 
         schema = vol.Schema(
             {
@@ -77,7 +84,7 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
-            errors={},
+            errors=errors,
         )
 
     @staticmethod

@@ -19,6 +19,8 @@ _LOGGER = logging.getLogger(__name__)
 
 class ZteRouterApi:
     """Async low-level API wrapper for ZTE 5G routers (e.g. G5TC)."""
+    _GOFORM_MAX_CONCURRENCY = 8
+    _GOFORM_STATIC_FIELDS = frozenset({"hardware_version", "wa_inner_version"})
     _GSM7_TABLE_HEX = {
         "000A", "000C", "000D", "0020", "0021", "0022", "0023", "0024", "0025",
         "0026", "0027", "0028", "0029", "002A", "002B", "002C", "002D", "002E",
@@ -74,12 +76,15 @@ class ZteRouterApi:
         self._http_encryption_key: Optional[str] = None
 
         self._auth_lock = asyncio.Lock()
-        self._action_lock = asyncio.Lock()
+        # Serialize poll batches and writes. Some firmwares rotate request state
+        # and reject a write when another router request is in flight.
+        self._request_lock = asyncio.Lock()
         self._rpc_id = 1
 
         # API mode: "ubus" (default) or "goform" (auto-detected during login)
         self._api_mode: str = "ubus"
         self._goform_session: Optional[aiohttp.ClientSession] = None
+        self._goform_field_cache: dict[str, Any] = {}
 
         # Headers similar to the JS script environment
         self._base_headers = {
@@ -164,6 +169,7 @@ class ZteRouterApi:
         self._logged_in = False
         self._session_id = None
         self._http_encryption_key = None
+        self._goform_field_cache.clear()
 
     async def async_close(self) -> None:
         """Close router-owned HTTP sessions."""
@@ -641,7 +647,6 @@ class ZteRouterApi:
         Some firmwares return mostly empty objects when the session expired.
         """
         probe_keys = (
-            "wa_inner_version",
             "network_type",
             "network_provider_fullname",
             "ppp_status",
@@ -650,12 +655,40 @@ class ZteRouterApi:
         )
         return any(values.get(k) not in (None, "", "-", "null") for k in probe_keys)
 
+    async def _async_goform_get_fields(
+        self,
+        fields: list[str],
+    ) -> dict[str, Any]:
+        """Fetch GoForm fields with bounded concurrency."""
+        semaphore = asyncio.Semaphore(self._GOFORM_MAX_CONCURRENCY)
+
+        async def _fetch(field: str) -> tuple[str, Any]:
+            async with semaphore:
+                response = await self._async_goform_get(field)
+            value = response.get(field) if isinstance(response, dict) else None
+            return field, value
+
+        return dict(await asyncio.gather(*(_fetch(field) for field in fields)))
+
+    @staticmethod
+    def _redact_ubus_batch_for_log(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return a log-safe copy of a UBUS batch without session tokens."""
+        redacted: list[dict[str, Any]] = []
+        for request in requests:
+            log_request = dict(request)
+            params = list(request.get("params") or [])
+            if params:
+                params[0] = "<redacted>"
+            log_request["params"] = params
+            redacted.append(log_request)
+        return redacted
+
     async def _async_goform_update_all(self) -> dict[str, Any]:
         """Fetch all router data via GoForm API using SINGLE-field queries.
         
         IMPORTANT: GoForm API does NOT support multi-field queries (e.g., "field1,field2").
-        We must query each field individually. To reduce latency, we use asyncio.gather()
-        to make many requests in parallel (10+ concurrent requests).
+        We must query each field individually. Requests are concurrency-limited to
+        avoid overwhelming the router's web server.
         """
         # Define which fields we need (grouped for documentation)
         basic_fields = [
@@ -677,33 +710,41 @@ class ZteRouterApi:
             "wifi_chip1_ssid1_access_sta_num", "wifi_chip2_ssid1_access_sta_num",
             "mwan_wanlan1_wan_ipaddr", "mwan_wanlan1_link_state", "mwan_wanlan1_ipv6_wan_ipaddr",
             "ppp_status", "wan_ipaddr", "ipv6_wan_ipaddr",
-            "hardware_version", "wa_inner_version",
+            "hardware_version", "wa_inner_version", "device_uptime",
             "flux_realtime_rx_thrpt", "flux_realtime_tx_thrpt", "flux_realtime_time",
             "flux_monthly_rx_bytes", "flux_monthly_tx_bytes",
         ]
 
-        # Query all basic fields in parallel (GoForm API limitation: only single fields work)
-        field_tasks = [self._async_goform_get(field) for field in basic_fields]
-        field_results = await asyncio.gather(*field_tasks, return_exceptions=False)
+        main = {
+            field: self._goform_field_cache[field]
+            for field in basic_fields
+            if field in self._goform_field_cache
+        }
+        fields_to_fetch = [field for field in basic_fields if field not in main]
+        main.update(await self._async_goform_get_fields(fields_to_fetch))
 
-        # Aggregate results into a single dict
-        main = {}
-        for field_name, result in zip(basic_fields, field_results):
-            if isinstance(result, dict) and field_name in result:
-                main[field_name] = result[field_name]
-            else:
-                main[field_name] = None
+        for field in self._GOFORM_STATIC_FIELDS:
+            value = main.get(field)
+            if value not in (None, "", "-", "null"):
+                self._goform_field_cache[field] = value
 
         if not self._goform_has_usable_payload(main):
             raise RuntimeError("GoForm returned no usable payload (session expired or unsupported response)")
 
-        # Query special endpoints
-        lan_resp = await self._async_goform_get("lan_station_list")
-        sms_cap_resp = await self._async_goform_get("sms_capacity_info")
-        sms_msgs_resp = await self._async_goform_get(
-            "sms_data_total",
-            {"page": "0", "data_per_page": "50", "mem_store": "1",
-             "tags": "10", "order_by": "order by id desc"},
+        # Query independent special endpoints in parallel.
+        lan_resp, sms_cap_resp, sms_msgs_resp = await asyncio.gather(
+            self._async_goform_get("lan_station_list"),
+            self._async_goform_get("sms_capacity_info"),
+            self._async_goform_get(
+                "sms_data_total",
+                {
+                    "page": "0",
+                    "data_per_page": "50",
+                    "mem_store": "1",
+                    "tags": "10",
+                    "order_by": "order by id desc",
+                },
+            ),
         )
 
         # Build response structure (same as UBUS update)
@@ -853,6 +894,7 @@ class ZteRouterApi:
                 "cpuUsage": main.get("cpuUsage"),
                 "cpu_load": main.get("cpu_load"),
                 "cpuload": main.get("cpuload"),
+                "device_uptime": main.get("device_uptime"),
             },
             "sim_info": sim_info,
             "common_config": common_config,
@@ -872,10 +914,19 @@ class ZteRouterApi:
 
     async def _async_goform_update_fast(self) -> dict[str, Any] | None:
         """Fetch only fast-changing stats via GoForm API."""
-        rx_resp, tx_resp, time_resp, cpu_usage_resp, cpu_load_resp, cpuload_resp = await asyncio.gather(
+        (
+            rx_resp,
+            tx_resp,
+            time_resp,
+            status_resp,
+            cpu_usage_resp,
+            cpu_load_resp,
+            cpuload_resp,
+        ) = await asyncio.gather(
             self._async_goform_get("flux_realtime_rx_thrpt"),
             self._async_goform_get("flux_realtime_tx_thrpt"),
             self._async_goform_get("flux_realtime_time"),
+            self._async_goform_get("ppp_status"),
             self._async_goform_get("cpu_usage"),
             self._async_goform_get("cpu_load"),
             self._async_goform_get("cpuload"),
@@ -890,7 +941,10 @@ class ZteRouterApi:
         ):
             raise RuntimeError("GoForm fast update returned no usable values")
         return {
-            "wan": {"real_time": time_resp.get("flux_realtime_time")},
+            "wan": {
+                "current_wan_status": status_resp.get("ppp_status"),
+                "real_time": time_resp.get("flux_realtime_time"),
+            },
             "wwandst": {
                 "real_rx_speed": rx_resp.get("flux_realtime_rx_thrpt"),
                 "real_tx_speed": tx_resp.get("flux_realtime_tx_thrpt"),
@@ -1187,7 +1241,8 @@ class ZteRouterApi:
             headers.setdefault("X-Requested-With", "XMLHttpRequest")
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 try:
-                    _LOGGER.debug("ubus batch request payload: %s", json.dumps(req))
+                    log_req = self._redact_ubus_batch_for_log(req)
+                    _LOGGER.debug("ubus batch request payload: %s", json.dumps(log_req))
                 except Exception:
                     pass
             async with self._session.post(
@@ -1361,6 +1416,23 @@ class ZteRouterApi:
         If `success_key` is provided, we additionally check the returned payload
         (e.g. {"result": "success"}).
         """
+        async with self._request_lock:
+            return await self._async_execute_ubus_action_locked(
+                call,
+                success_key=success_key,
+                success_values=success_values,
+                z_mode_override=z_mode_override,
+            )
+
+    async def _async_execute_ubus_action_locked(
+        self,
+        call: dict[str, Any],
+        *,
+        success_key: str | None = None,
+        success_values: set[str] | None = None,
+        z_mode_override: str | None = None,
+    ) -> bool:
+        """Execute an action while the shared router request lock is held."""
         res = await self.async_call_ubus(call, z_mode_override=z_mode_override)
         if not res.get("success"):
             err = res.get("error") or {}
@@ -1437,7 +1509,7 @@ class ZteRouterApi:
                 )
                 success_values = None
 
-        async with self._action_lock:
+        async with self._request_lock:
             if action.get("force_relogin", False):
                 try:
                     await self._async_ensure_logged_in(force=True)
@@ -1450,7 +1522,7 @@ class ZteRouterApi:
                     )
                     return False
 
-            return await self.async_execute_ubus_action(
+            return await self._async_execute_ubus_action_locked(
                 call,
                 success_key=success_key,
                 success_values=success_values,
@@ -1466,14 +1538,11 @@ class ZteRouterApi:
           - "wwandst": get_wwandst(type=4) payload (for real_time on firmwares that omit it in router_get_status)
           - "device": get_device_info(cpuinfo) payload
         """
+        async with self._request_lock:
+            return await self._async_update_fast_locked()
 
-        # Avoid interleaving poll batches with write actions. Some ZTE firmwares
-        # rotate tokens/ACL state per request and reject writes when a poll
-        # request races a write.
-        if self._action_lock.locked():
-            async with self._action_lock:
-                pass
-
+    async def _async_update_fast_locked(self) -> dict[str, Any] | None:
+        """Fetch fast data while the shared router request lock is held."""
         # Ensure we have an authenticated session.
         if not self._logged_in:
             await self._async_ensure_logged_in()
@@ -1523,13 +1592,11 @@ class ZteRouterApi:
     # --------------------------------------------------------------------
     async def async_update_all(self) -> dict[str, Any]:
         """Fetch all relevant router data for Home Assistant in one go."""
+        async with self._request_lock:
+            return await self._async_update_all_locked()
 
-        # Keep full polling out of the action write window for the same reason
-        # as async_update_fast().
-        if self._action_lock.locked():
-            async with self._action_lock:
-                pass
-
+    async def _async_update_all_locked(self) -> dict[str, Any]:
+        """Fetch all data while the shared router request lock is held."""
         if not self._logged_in:
             await self._async_ensure_logged_in()
 
@@ -1891,6 +1958,17 @@ class ZteRouterApi:
 
     async def async_send_sms(self, number: str, message: str, *, sms_id: str = "0") -> bool:
         """Send SMS and wait for command status completion."""
+        async with self._request_lock:
+            return await self._async_send_sms_locked(number, message, sms_id=sms_id)
+
+    async def _async_send_sms_locked(
+        self,
+        number: str,
+        message: str,
+        *,
+        sms_id: str = "0",
+    ) -> bool:
+        """Send SMS while the shared router request lock is held."""
         payload = {
             "number": number,
             "sms_time": self._build_sms_time_string(),

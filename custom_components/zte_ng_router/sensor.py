@@ -380,7 +380,13 @@ def _connected_session_seconds(data: dict[str, Any]) -> float | None:
     """Return current connection duration in seconds only while WAN is connected."""
     wan = data.get("wan") or {}
     status = _as_text(wan.get("mwan_wanlan1_status")) or _as_text(wan.get("current_wan_status"))
-    if status not in {"ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"}:
+    if status is None or status.lower() not in {
+        "connected",
+        "ppp_connected",
+        "ipv4_connected",
+        "ipv6_connected",
+        "ipv4_ipv6_connected",
+    }:
         return None
 
     value = wan.get("real_time")
@@ -852,14 +858,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        if self._key not in {
-            "sms_count",
-            "sms_latest",
-            "sms_unread_total",
-            "sms_nv_total",
-            "sms_sim_total",
-            "sms_nv_used_total",
-        }:
+        if self._key != "sms_latest":
             return None
 
         data: dict[str, Any] = self.coordinator.data or {}

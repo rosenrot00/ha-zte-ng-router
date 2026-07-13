@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.helpers.config_validation as cv
@@ -113,7 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER,
         name=f"zte_ng_router_{name}",
         update_method=_async_update_data,
-        update_interval=timedelta(seconds=scan_interval),
+        update_interval=None,
     )
 
     coordinator_fast = DataUpdateCoordinator(
@@ -121,32 +122,85 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER,
         name=f"zte_ng_router_{name}_fast",
         update_method=_async_update_fast,
-        update_interval=timedelta(seconds=fast_scan_interval),
+        update_interval=None,
     )
 
-    await coordinator.async_config_entry_first_refresh()
-    await coordinator_fast.async_config_entry_first_refresh()
+    store = hass.data[DOMAIN][entry.entry_id]
+    poll_unsubs: list[Any] = []
 
-    hass.data[DOMAIN][entry.entry_id].update(
-        {
-            "api": api,
-            "coordinator": coordinator,
-            "coordinator_fast": coordinator_fast,
-            "name": name,
-            "pause_until": hass.data[DOMAIN][entry.entry_id].get("pause_until"),
-        }
-    )
+    def _cancel_polling() -> None:
+        """Cancel integration-owned polling timers."""
+        while poll_unsubs:
+            poll_unsubs.pop()()
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    return True
+    def _schedule_polling() -> None:
+        """Start integration-owned polling timers."""
+        _cancel_polling()
+
+        async def _refresh_full(_now: datetime) -> None:
+            await coordinator.async_refresh()
+
+        async def _refresh_fast(_now: datetime) -> None:
+            await coordinator_fast.async_refresh()
+
+        poll_unsubs.extend(
+            (
+                async_track_time_interval(
+                    hass,
+                    _refresh_full,
+                    timedelta(seconds=scan_interval),
+                ),
+                async_track_time_interval(
+                    hass,
+                    _refresh_fast,
+                    timedelta(seconds=fast_scan_interval),
+                ),
+            )
+        )
+
+    try:
+        await coordinator.async_config_entry_first_refresh()
+        await coordinator_fast.async_config_entry_first_refresh()
+
+        store.update(
+            {
+                "api": api,
+                "coordinator": coordinator,
+                "coordinator_fast": coordinator_fast,
+                "name": name,
+                "pause_until": store.get("pause_until"),
+                "cancel_polling": _cancel_polling,
+                "schedule_polling": _schedule_polling,
+            }
+        )
+
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        _schedule_polling()
+        return True
+    except Exception:
+        _cancel_polling()
+        try:
+            await api.async_close()
+        finally:
+            hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    cancel_polling = data.get("cancel_polling")
+    if callable(cancel_polling):
+        cancel_polling()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         data = hass.data[DOMAIN].pop(entry.entry_id, None) or {}
         api = data.get("api")
         if api is not None:
             await api.async_close()
+    else:
+        schedule_polling = data.get("schedule_polling")
+        if callable(schedule_polling):
+            schedule_polling()
     return unload_ok

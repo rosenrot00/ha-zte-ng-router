@@ -368,42 +368,10 @@ class ZtePausePollingSwitch(SwitchEntity):
         pause_until: datetime | None = self._store.get("pause_until")
         return pause_until is not None and dt_util.utcnow() < pause_until
 
-    def _pause_coordinator(self, key: str) -> None:
-        """Stop a coordinator's scheduled polling until explicitly resumed."""
-        coordinator = self._store.get(key)
-        if coordinator is None:
-            return
-
-        original_intervals = self._store.setdefault("_pause_original_intervals", {})
-        original_intervals.setdefault(key, coordinator.update_interval)
-        coordinator.update_interval = None
-
-        unschedule = getattr(coordinator, "_unschedule_refresh", None)
-        if callable(unschedule):
-            unschedule()
-            return
-
-        unsub_refresh = getattr(coordinator, "_unsub_refresh", None)
-        if callable(unsub_refresh):
-            unsub_refresh()
-            setattr(coordinator, "_unsub_refresh", None)
-
-    async def _resume_coordinator(self, key: str) -> None:
-        """Restore a coordinator's polling interval and trigger one fresh update."""
-        coordinator = self._store.get(key)
-        if coordinator is None:
-            return
-
-        original_intervals = self._store.get("_pause_original_intervals") or {}
-        interval = original_intervals.get(key)
-        if interval is not None:
-            coordinator.update_interval = interval
-
-        await coordinator.async_request_refresh()
-
     def _pause_polling(self) -> None:
-        self._pause_coordinator("coordinator")
-        self._pause_coordinator("coordinator_fast")
+        cancel_polling = self._store.get("cancel_polling")
+        if callable(cancel_polling):
+            cancel_polling()
 
     async def _resume_polling(self) -> None:
         api = self._store.get("api")
@@ -413,9 +381,16 @@ class ZtePausePollingSwitch(SwitchEntity):
         if api is not None:
             api.invalidate_session()
 
-        await self._resume_coordinator("coordinator")
-        await self._resume_coordinator("coordinator_fast")
-        self._store.pop("_pause_original_intervals", None)
+        schedule_polling = self._store.get("schedule_polling")
+        if callable(schedule_polling):
+            schedule_polling()
+
+        coordinator = self._store.get("coordinator")
+        if coordinator is not None:
+            await coordinator.async_request_refresh()
+        coordinator_fast = self._store.get("coordinator_fast")
+        if coordinator_fast is not None:
+            await coordinator_fast.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         # Cancel any existing auto-off timer

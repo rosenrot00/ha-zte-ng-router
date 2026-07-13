@@ -4,41 +4,20 @@ on:
   push:
     tags:
       - "*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag name for the release (e.g. 2026.02.7)"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
-concurrency:
-  group: release-${{ github.ref_name }}
-  cancel-in-progress: false
-
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Build zip (root files, no folder)
         run: |
           set -euxo pipefail
-
           DOMAIN="zte_ng_router"
           ZIP_NAME="${DOMAIN}.zip"
 
@@ -46,27 +25,17 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
+          # Put integration files directly in ZIP root (no top-level folder)
           cp -a "custom_components/${DOMAIN}/." "dist/"
 
           (cd dist && zip -r "../${ZIP_NAME}" . \
             -x "**/__pycache__/**" "**/*.pyc" "**/.DS_Store")
 
+          # Sanity checks
           unzip -l "${ZIP_NAME}" | head -n 50
           unzip -l "${ZIP_NAME}" | grep -q "^ *[0-9].*manifest.json$"
-
-      - name: Create release if missing
-        run: |
-          gh release view "${{ steps.tag.outputs.TAG }}" >/dev/null 2>&1 || \
-          gh release create "${{ steps.tag.outputs.TAG }}" \
-            --title "${{ steps.tag.outputs.TAG }}" \
-            --notes ""
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload zip to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.TAG }}
-          name: ${{ steps.tag.outputs.TAG }}
           files: zte_ng_router.zip
-          token: ${{ secrets.GITHUB_TOKEN }}
