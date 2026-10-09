@@ -9,11 +9,11 @@
           "password": "Router-Passwort",
           "verify_tls": "TLS-Zertifikat pruefen",
           "scan_interval": "Langsames Abfrageintervall (Sekunden)",
-          "track_wifi_clients": "WLAN-Geraete verfolgen",
-          "client_consider_home": "Abwesenheitsfrist fuer WLAN-Geraete (Sekunden)"
+          "track_wifi_clients": "Netzwerkgeraete verfolgen (WLAN und LAN)",
+          "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)"
         },
         "data_description": {
-          "track_wifi_clients": "WLAN-Geraete beim langsamen Polling ausschliesslich lesen. Neue Tracker sind deaktiviert, bis du sie in den Entitaetseinstellungen aktivierst.",
+          "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Neue Tracker sind deaktiviert, bis du sie in den Entitaetseinstellungen aktivierst.",
           "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend. Standard 180 Sekunden; Fehler und Polling-Pausen setzen die Frist zurueck."
         }
       }
@@ -30,11 +30,11 @@
           "password": "Neues Router-Passwort (leer lassen zum Beibehalten)",
           "verify_tls": "TLS-Zertifikat pruefen",
           "scan_interval": "Langsames Abfrageintervall (Sekunden)",
-          "track_wifi_clients": "WLAN-Geraete verfolgen",
-          "client_consider_home": "Abwesenheitsfrist fuer WLAN-Geraete (Sekunden)"
+          "track_wifi_clients": "Netzwerkgeraete verfolgen (WLAN und LAN)",
+          "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)"
         },
         "data_description": {
-          "track_wifi_clients": "WLAN-Geraete beim langsamen Polling ausschliesslich lesen. Gewuenschte Tracker unter Einstellungen > Geraete & Dienste > Entitaeten aktivieren; deaktivierte Entitaeten einblenden.",
+          "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Gewuenschte Tracker unter Einstellungen > Geraete & Dienste > Entitaeten aktivieren; deaktivierte Entitaeten einblenden.",
           "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend (0-3600 Sekunden). Fehler und Polling-Pausen setzen die Frist zurueck."
         }
       }

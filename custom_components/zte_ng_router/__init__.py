@@ -23,7 +23,7 @@ from .const import (
     CONF_FAST_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_FAST_SCAN_INTERVAL,
-    CONF_TRACK_WIFI_CLIENTS,
+    CONF_TRACK_CLIENTS,
 )
 from .zte_api import ZteRouterApi
 
@@ -75,7 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         base_url=host,
         password=password,
         verify_tls=verify_tls,
-        track_wifi_clients=options.get(CONF_TRACK_WIFI_CLIENTS, data.get(CONF_TRACK_WIFI_CLIENTS, False)),
+        track_clients=options.get(CONF_TRACK_CLIENTS, data.get(CONF_TRACK_CLIENTS, False)),
     )
 
     async def _async_update_data() -> dict[str, Any]:
@@ -129,7 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _cancel_polling() -> None:
         """Cancel integration-owned polling timers."""
-        reset_absence = store.get("reset_wifi_client_absence")
+        reset_absence = store.get("reset_client_absence")
         if callable(reset_absence):
             reset_absence()
         while poll_unsubs:

@@ -1,4 +1,4 @@
-"""Optional, read-only WLAN client tracking from complete slow-poll snapshots."""
+"""Optional, read-only WLAN and LAN tracking from slow-poll snapshots."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,14 +13,14 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
-    DOMAIN, CONF_TRACK_WIFI_CLIENTS, CONF_CLIENT_CONSIDER_HOME,
+    DOMAIN, CONF_TRACK_CLIENTS, CONF_CLIENT_CONSIDER_HOME,
     DEFAULT_CLIENT_CONSIDER_HOME,
 )
 from .zte_api import ZteRouterApi
 
 
 @dataclass
-class WifiClient:
+class NetworkClient:
     """Cached client state; no presence decisions are made in entity properties."""
 
     mac: str
@@ -28,14 +28,15 @@ class WifiClient:
     last_seen: datetime | None = None
     connected: bool | None = None
     missing_since: float | None = None
+    available: bool = False
 
 
-class WifiClientTracking:
-    """Apply only complete snapshots and reset absence after observation gaps."""
+class NetworkClientTracking:
+    """Accept positive sightings, but require both lists to confirm absence."""
 
     def __init__(self, consider_home: int) -> None:
         self.consider_home = consider_home
-        self.clients: dict[str, WifiClient] = {}
+        self.clients: dict[str, NetworkClient] = {}
         self.available = False
         self._last_observed: datetime | None = None
 
@@ -51,8 +52,10 @@ class WifiClientTracking:
             return
         observed = snapshot.get("observed_at")
         clients = snapshot.get("clients")
+        complete = snapshot.get("complete", True)
         if (not isinstance(observed, datetime) or observed.tzinfo is None
                 or observed.utcoffset() is None or not isinstance(clients, dict)
+                or not isinstance(complete, bool)
                 or any(ZteRouterApi.normalize_client_mac(mac) != mac or not isinstance(metadata, dict)
                        for mac, metadata in clients.items())):
             self.available = False
@@ -65,14 +68,20 @@ class WifiClientTracking:
         self.available = True
         now = time.monotonic() if now is None else now
         for mac, metadata in clients.items():
-            client = self.clients.setdefault(mac, WifiClient(mac))
+            client = self.clients.setdefault(mac, NetworkClient(mac))
             client.metadata = dict(metadata)
             client.last_seen = observed.astimezone(timezone.utc)
             client.connected = True
             client.missing_since = None
+            client.available = True
         for mac, client in self.clients.items():
             if mac in clients:
                 continue
+            if not complete:
+                client.available = False
+                client.missing_since = None
+                continue
+            client.available = True
             if client.missing_since is None:
                 client.missing_since = now
             if now - client.missing_since >= self.consider_home:
@@ -80,14 +89,15 @@ class WifiClientTracking:
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
-    """Discover WLAN clients only when the user opts in."""
-    if not entry.options.get(CONF_TRACK_WIFI_CLIENTS, entry.data.get(CONF_TRACK_WIFI_CLIENTS, False)):
+    """Discover WLAN/LAN clients only when the user opts in."""
+    if not entry.options.get(CONF_TRACK_CLIENTS, entry.data.get(CONF_TRACK_CLIENTS, False)):
         return
     store = hass.data[DOMAIN][entry.entry_id]
     coordinator = store["coordinator"]
-    tracking = WifiClientTracking(entry.options.get(
+    tracking = NetworkClientTracking(entry.options.get(
         CONF_CLIENT_CONSIDER_HOME, entry.data.get(CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME)
     ))
+    # Retain the original ID prefix so existing WLAN trackers survive upgrades.
     prefix = f"{entry.entry_id}_wifi_"
     # Recreate existing trackers even when their clients are offline after a restart.
     registry = er.async_get(hass)
@@ -96,33 +106,33 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
             continue
         mac = ZteRouterApi.normalize_client_mac(entity.unique_id[len(prefix):])
         if mac is not None:
-            tracking.clients.setdefault(mac, WifiClient(mac))
+            tracking.clients.setdefault(mac, NetworkClient(mac))
     added: set[str] = set()
 
     @callback
     def update_clients() -> None:
-        tracking.update((coordinator.data or {}).get("wifi_clients") if coordinator.last_update_success else None)
+        tracking.update((coordinator.data or {}).get("network_clients") if coordinator.last_update_success else None)
         new = tracking.clients.keys() - added
         if new:
             added.update(new)
             async_add_entities([
-                ZteWifiClientTracker(coordinator, tracking, mac, entry.entry_id, store["name"])
+                ZteNetworkClientTracker(coordinator, tracking, mac, entry.entry_id, store["name"])
                 for mac in sorted(new)
             ])
 
-    store["reset_wifi_client_absence"] = tracking.reset_absence
-    entry.async_on_unload(lambda: store.pop("reset_wifi_client_absence", None))
+    store["reset_client_absence"] = tracking.reset_absence
+    entry.async_on_unload(lambda: store.pop("reset_client_absence", None))
     entry.async_on_unload(coordinator.async_add_listener(update_clients))
     update_clients()
 
 
-class ZteWifiClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
+class ZteNetworkClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
     """HA-native tracker, identified by router config entry and normalized MAC."""
 
     _attr_source_type = SourceType.ROUTER
     _attr_entity_category = None
 
-    def __init__(self, coordinator, tracking: WifiClientTracking, mac: str,
+    def __init__(self, coordinator, tracking: NetworkClientTracking, mac: str,
                  entry_id: str, router_name: str) -> None:
         super().__init__(coordinator)
         self._tracking = tracking
@@ -139,7 +149,7 @@ class ZteWifiClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
         return False
 
     @property
-    def _client(self) -> WifiClient:
+    def _client(self) -> NetworkClient:
         return self._tracking.clients[self._mac]
 
     @property
@@ -164,14 +174,15 @@ class ZteWifiClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self._tracking.available
+        return super().available and self._tracking.available and self._client.available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"last_seen": self._client.last_seen.isoformat() if self._client.last_seen else None,
                 "ipv6_address": self._client.metadata.get("ipv6_address"),
                 "interface_type": self._client.metadata.get("interface_type"),
-                "connection_type": "wifi"}
+                "connection_type": self._client.metadata.get("connection_type"),
+                "connection_types": self._client.metadata.get("connection_types", [])}
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -184,6 +195,8 @@ class ZteWifiClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
             "ip_address": state.attributes.get("ip"),
             "ipv6_address": state.attributes.get("ipv6_address"),
             "interface_type": state.attributes.get("interface_type"),
+            "connection_type": state.attributes.get("connection_type"),
+            "connection_types": state.attributes.get("connection_types", []),
         }
         try:
             last_seen = datetime.fromisoformat(state.attributes.get("last_seen") or "")

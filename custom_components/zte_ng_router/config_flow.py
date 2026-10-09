@@ -17,7 +17,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
     MAX_SCAN_INTERVAL,
-    CONF_TRACK_WIFI_CLIENTS,
+    CONF_TRACK_CLIENTS,
     CONF_CLIENT_CONSIDER_HOME,
     DEFAULT_CLIENT_CONSIDER_HOME,
 )
@@ -55,7 +55,7 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                         CONF_VERIFY_TLS: user_input[CONF_VERIFY_TLS],
                         CONF_SCAN_INTERVAL: scan_interval,
-                        CONF_TRACK_WIFI_CLIENTS: user_input.get(CONF_TRACK_WIFI_CLIENTS, False),
+                        CONF_TRACK_CLIENTS: user_input.get(CONF_TRACK_CLIENTS, False),
                         CONF_CLIENT_CONSIDER_HOME: user_input.get(
                             CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
                         ),
@@ -72,7 +72,7 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
                 ),
-                vol.Optional(CONF_TRACK_WIFI_CLIENTS, default=False): bool,
+                vol.Optional(CONF_TRACK_CLIENTS, default=False): bool,
                 vol.Optional(CONF_CLIENT_CONSIDER_HOME, default=DEFAULT_CLIENT_CONSIDER_HOME): vol.All(
                     vol.Coerce(int), vol.Range(min=0, max=3600),
                 ),
@@ -117,7 +117,7 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
             # TLS and scan interval always from the form
             existing[CONF_VERIFY_TLS] = user_input[CONF_VERIFY_TLS]
             existing[CONF_SCAN_INTERVAL] = user_input[CONF_SCAN_INTERVAL]
-            existing[CONF_TRACK_WIFI_CLIENTS] = user_input.get(CONF_TRACK_WIFI_CLIENTS, False)
+            existing[CONF_TRACK_CLIENTS] = user_input.get(CONF_TRACK_CLIENTS, False)
             existing[CONF_CLIENT_CONSIDER_HOME] = user_input.get(
                 CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
             )
@@ -161,8 +161,8 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
                 ),
                 vol.Optional(
-                    CONF_TRACK_WIFI_CLIENTS,
-                    default=options.get(CONF_TRACK_WIFI_CLIENTS, data.get(CONF_TRACK_WIFI_CLIENTS, False)),
+                    CONF_TRACK_CLIENTS,
+                    default=options.get(CONF_TRACK_CLIENTS, data.get(CONF_TRACK_CLIENTS, False)),
                 ): bool,
                 vol.Optional(
                     CONF_CLIENT_CONSIDER_HOME,

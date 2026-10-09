@@ -4,7 +4,8 @@ CONF_NAME = "name"
 CONF_VERIFY_TLS = "verify_tls"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_FAST_SCAN_INTERVAL = "fast_scan_interval"
-CONF_TRACK_WIFI_CLIENTS = "track_wifi_clients"
+# Preserve the existing option key when extending tracking to wired clients.
+CONF_TRACK_CLIENTS = "track_wifi_clients"
 CONF_CLIENT_CONSIDER_HOME = "client_consider_home"
 DEFAULT_CLIENT_CONSIDER_HOME = 180  # seconds of confirmed absence
 

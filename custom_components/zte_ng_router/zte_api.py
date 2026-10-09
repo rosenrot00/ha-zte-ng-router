@@ -56,7 +56,7 @@ class ZteRouterApi:
         password: str = "",
         verify_tls: bool = True,
         session: ClientSession | None = None,
-        track_wifi_clients: bool = False,
+        track_clients: bool = False,
     ) -> None:
         # base_url like "http://192.168.254.1" or "https://192.168.254.1"
         self.hass = hass
@@ -65,8 +65,8 @@ class ZteRouterApi:
         self.password = password
         self.verify_tls = verify_tls
         self._sms_encryption: str | None = None
-        self.track_wifi_clients = track_wifi_clients
-        self._wifi_client_snapshot_ok: bool | None = None
+        self.track_clients = track_clients
+        self._client_snapshot_ok: bool | None = None
 
         self._owns_session = session is None
         if session is not None:
@@ -1766,7 +1766,7 @@ class ZteRouterApi:
         return ":".join(compact[i:i + 2] for i in range(0, 12, 2))
 
     @staticmethod
-    def _normalize_wifi_client(row: Any) -> dict[str, Any] | None:
+    def _normalize_network_client(row: Any) -> dict[str, Any] | None:
         if not isinstance(row, dict):
             return None
         mac = ZteRouterApi.normalize_client_mac(row.get("mac_address"))
@@ -1792,53 +1792,77 @@ class ZteRouterApi:
                                   else text("interface_type")}
 
     @classmethod
-    def _wifi_client_counts(cls, data: Any) -> tuple[int, int] | None:
+    def _network_client_counts(cls, data: Any) -> tuple[int, int, int] | None:
         if not isinstance(data, dict):
             return None
         values = []
-        for field in ("access_total_num", "wireless_num"):
+        for field in ("access_total_num", "wireless_num", "lan_num"):
             value = data.get(field)
             if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)):
                 return None
             values.append(int(value))
-        total, wireless = values
-        return (total, wireless) if 0 <= wireless <= total <= cls._MAX_WIFI_CLIENTS else None
+        total, wireless, lan = values
+        return (total, wireless, lan) if max(wireless, lan) <= total <= cls._MAX_WIFI_CLIENTS else None
 
-    async def _async_read_wifi_clients_locked(self, initial_counts: Any) -> dict[str, Any] | None:
-        """Read a complete WLAN snapshot; never turn partial data into absence."""
-        counts = self._wifi_client_counts(initial_counts)
+    async def _async_read_network_clients_locked(self, initial_counts: Any) -> dict[str, Any] | None:
+        """Read both active client lists; partial snapshots only prove presence."""
+        counts = self._network_client_counts(initial_counts)
         if self._api_mode != "ubus" or counts is None:
             return None
-        total, wireless = counts
+        total, wireless, lan = counts
         # Match the WebUI's total-count pagination, then verify the WLAN count.
         calls = [self.build_ubus_call("zwrt_router.api", "router_wireless_access_list", {
             "start_id": start, "end_id": start + self._WIFI_CLIENT_PAGE_SIZE - 1,
         }) for start in range(1, total + 1, self._WIFI_CLIENT_PAGE_SIZE)] if wireless else []
+        wifi_pages = len(calls)
+        if lan:
+            calls.append(self.build_ubus_call("zwrt_router.api", "router_lan_access_list"))
         calls.append(self.build_ubus_call("zwrt_router.api", "router_get_user_list_num"))
         results = await self.async_call_ubus_batch(
-            calls, batch_name="wifi_clients", z_mode_override="0",
+            calls, batch_name="network_clients", z_mode_override="0",
             log_raw_response=False, retry_on_access_denied=False,
         )
-        if len(results) != len(calls) or any(not r.get("success") for r in results):
+        if len(results) != len(calls) or not results[-1].get("success"):
             return None
-        final_counts = self._wifi_client_counts(results[-1].get("data"))
+        final_counts = self._network_client_counts(results[-1].get("data"))
         if final_counts != counts:
             return None
-        clients: dict[str, dict[str, Any]] = {}
-        for result in results[:-1]:
-            payload = result.get("data")
-            rows = payload.get("wireless_access_list_info") if isinstance(payload, dict) else None
-            if not isinstance(rows, list) or len(rows) > self._WIFI_CLIENT_PAGE_SIZE:
-                return None
-            for row in rows:
-                client = self._normalize_wifi_client(row)
-                if client is None:
+        def collect(pages: list[dict[str, Any]], key: str, expected: int,
+                    page_limit: int) -> dict[str, dict[str, Any]] | None:
+            clients = {}
+            for result in pages:
+                payload = result.get("data")
+                rows = payload.get(key) if isinstance(payload, dict) else None
+                if not result.get("success") or not isinstance(rows, list) or len(rows) > page_limit:
                     return None
-                clients[client["mac_address"]] = client
-        if len(clients) != wireless:
+                for row in rows:
+                    client = self._normalize_network_client(row)
+                    if client is None:
+                        return None
+                    clients[client["mac_address"]] = client
+            return clients if len(clients) == expected else None
+
+        wifi_clients = collect(results[:wifi_pages], "wireless_access_list_info",
+                               wireless, self._WIFI_CLIENT_PAGE_SIZE)
+        lan_clients = collect(results[wifi_pages:-1], "lan_access_list_info",
+                              lan, self._MAX_WIFI_CLIENTS)
+        if wifi_clients is None and lan_clients is None:
             return None
-        _LOGGER.debug("Read complete WLAN client snapshot: count=%s", len(clients))
-        return {"clients": clients, "observed_at": datetime.now(timezone.utc)}
+        complete = wifi_clients is not None and lan_clients is not None
+        clients: dict[str, dict[str, Any]] = {}
+        for connection, source in (("wifi", wifi_clients), ("lan", lan_clients)):
+            for mac, metadata in (source or {}).items():
+                if mac not in clients:
+                    clients[mac] = {**metadata, "connection_types": [connection]}
+                else:
+                    # A MAC can occur in both lists during a connection handover.
+                    clients[mac]["connection_types"].append(connection)
+                    for key, value in metadata.items():
+                        if clients[mac].get(key) is None:
+                            clients[mac][key] = value
+                clients[mac]["connection_type"] = "+".join(clients[mac]["connection_types"])
+        _LOGGER.debug("Read network client snapshot: count=%s complete=%s", len(clients), complete)
+        return {"clients": clients, "complete": complete, "observed_at": datetime.now(timezone.utc)}
 
     async def async_update_all(self) -> dict[str, Any]:
         """Fetch all relevant router data for Home Assistant in one go."""
@@ -1983,21 +2007,21 @@ class ZteRouterApi:
         wan = wan_res.get("data") or {}
         sim_info = sim_info_res.get("data") or {}
         user_list_num = user_list_num_res.get("data") or {}
-        wifi_clients = None
-        if self.track_wifi_clients:
+        network_clients = None
+        if self.track_clients:
             try:
-                wifi_clients = await self._async_read_wifi_clients_locked(
+                network_clients = await self._async_read_network_clients_locked(
                     user_list_num if user_list_num_res.get("success") else None
                 )
             except Exception:
                 # Client tracking is optional; do not fail unrelated sensors/SMS.
-                _LOGGER.debug("WLAN client snapshot unavailable")
-            snapshot_ok = wifi_clients is not None
-            if not snapshot_ok and self._wifi_client_snapshot_ok is not False:
-                _LOGGER.warning("WLAN client tracking unavailable: incomplete or unsupported client list")
-            elif snapshot_ok and self._wifi_client_snapshot_ok is False:
-                _LOGGER.info("WLAN client tracking recovered")
-            self._wifi_client_snapshot_ok = snapshot_ok
+                _LOGGER.debug("Network client snapshot unavailable")
+            snapshot_ok = network_clients is not None and network_clients.get("complete", True)
+            if not snapshot_ok and self._client_snapshot_ok is not False:
+                _LOGGER.warning("Network client tracking incomplete: missing clients cannot be confirmed absent")
+            elif snapshot_ok and self._client_snapshot_ok is False:
+                _LOGGER.info("Network client tracking recovered")
+            self._client_snapshot_ok = snapshot_ok
         common_config = (uci_common_res.get("data") or {}).get("values") or {}
         self._update_sms_encryption_from_device(common_config, dev_res.get("data") or {})
         odu_led = odu_led_res.get("data") or {}
@@ -2035,7 +2059,7 @@ class ZteRouterApi:
             "common_config": common_config,
             "wan": wan,
             "user_list_num": user_list_num,
-            "wifi_clients": wifi_clients,
+            "network_clients": network_clients,
             "wwandst": wwandst,
             "wwaniface": wwaniface,
             "wwandst_monthly": wwandst_monthly,

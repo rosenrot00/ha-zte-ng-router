@@ -9,11 +9,11 @@
           "password": "Router password",
           "verify_tls": "Verify TLS certificate",
           "scan_interval": "Slow polling interval (seconds)",
-          "track_wifi_clients": "Track Wi-Fi clients",
-          "client_consider_home": "Wi-Fi client absence grace period (seconds)"
+          "track_wifi_clients": "Track network clients (Wi-Fi and LAN)",
+          "client_consider_home": "Client absence grace period (seconds)"
         },
         "data_description": {
-          "track_wifi_clients": "Read-only WLAN device discovery during slow polling. New trackers are disabled until enabled in the entity settings.",
+          "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. New trackers are disabled until enabled in the entity settings.",
           "client_consider_home": "Confirmed absence before reporting a client away. Default 180 seconds; errors and polling pauses reset the grace period."
         }
       }
@@ -30,11 +30,11 @@
           "password": "New router password (leave empty to keep current)",
           "verify_tls": "Verify TLS certificate",
           "scan_interval": "Slow polling interval (seconds)",
-          "track_wifi_clients": "Track Wi-Fi clients",
-          "client_consider_home": "Wi-Fi client absence grace period (seconds)"
+          "track_wifi_clients": "Track network clients (Wi-Fi and LAN)",
+          "client_consider_home": "Client absence grace period (seconds)"
         },
         "data_description": {
-          "track_wifi_clients": "Read-only WLAN device discovery during slow polling. Enable wanted trackers under Settings > Devices & services > Entities, including disabled entities.",
+          "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. Enable wanted trackers under Settings > Devices & services > Entities, including disabled entities.",
           "client_consider_home": "Confirmed absence before reporting a client away (0-3600 seconds). Errors and polling pauses reset the grace period."
         }
       }

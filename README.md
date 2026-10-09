@@ -40,7 +40,7 @@ Feature availability depends on router model and firmware.
 - Firmware update status, advertised version and download progress
 - Manual firmware check and a separate update-start button
 - GNSS latitude/longitude with fix status, source and the router's original fix time
-- Optional WLAN client trackers with MAC/IP/hostname and presence history
+- Optional WLAN/LAN client trackers with MAC/IP/hostname and presence history
 - SMS inbox readout (count, unread, storage capacity + latest message preview)  
 - SMS compose + send (via Home Assistant text field and button)  
 - Device information (model, firmware, IMEI/ICCID where available)  
@@ -61,9 +61,9 @@ These sensors therefore do not add HTTP requests to the fast polling cycle.
 Manual firmware actions request a full refresh without moving firmware metadata
 into permanent fast polling.
 
-### WLAN Client Tracking
+### Network Client Tracking
 
-1. In the integration's **Configure** dialog, enable **Track Wi-Fi clients**.
+1. In the integration's **Configure** dialog, enable **Track network clients (Wi-Fi and LAN)**.
 2. After discovery, open **Settings > Devices & services > Entities**, filter by
    this integration and include disabled entities. Enable the trackers you want.
 3. Add those `device_tracker` entities to a dashboard, an automation, or a person
@@ -72,24 +72,32 @@ into permanent fast polling.
 
 Tracking is off by default and adds no requests while off. When enabled, client
 lists are read during slow/full polling, not fast polling. UBUS routers exposing
-`router_wireless_access_list` are supported; no GoForm client API is guessed.
-Only the WLAN clients exposed by that endpoint are tracked, not LAN clients or
-offline/DHCP lease lists. Guest/mesh coverage depends on what the router reports.
+`router_wireless_access_list` and `router_lan_access_list` are supported; no GoForm
+client API is guessed. Both active WLAN and wired LAN clients are tracked, not
+offline/DHCP lease lists. Guest/mesh/switch coverage depends on what the router reports.
+The LAN call shares the client batch with WLAN pages and the final count check,
+so it does not add another HTTP request to that slow-poll cycle.
 
 Each tracker is identified by the router entry and normalized MAC, so changing
 IP addresses or hostnames do not create duplicate entities. It exposes hostname,
 IPv4, IPv6 (when supplied), raw `interface_type`, and UTC `last_seen`. No band/SSID
-mapping is invented. IP addresses on disconnected trackers are last-known values.
+mapping is invented. `connection_type` is `wifi`, `lan`, or `wifi+lan` if a MAC
+appears in both lists; `connection_types` also exposes these as a list. The same
+MAC retains one tracker when switching connection type. Separate wired/wireless
+MACs remain separate trackers, since their physical identity cannot be inferred.
+IP addresses on disconnected trackers are last-known values.
 MAC/IP/hostnames from the client list are not dumped into raw polling logs.
 
-`home` means seen on this router's WLAN, not proof that a person is physically
+`home` means seen on this router's WLAN or LAN, not proof that a person is physically
 home. A return is reported on the next successful poll. Absence is reported only
-after the **Wi-Fi client absence grace period** (default 180 seconds, configurable
+after the **Client absence grace period** (default 180 seconds, configurable
 0-3600), starting with the first complete snapshot missing that client. With the
 default slow interval, departure detection therefore takes roughly 3-4 minutes.
-All pages and the final device count must agree. Failed, incomplete or changing
-lists make trackers unavailable instead of reporting everyone away; unrelated
-sensors remain usable. Polling pauses freeze the last state and reset the absence
+All pages and the final device counts must agree before absence is confirmed.
+If one client list fails, sightings from the other remain usable, but missing
+clients become unavailable instead of being reported away. Changing counts or
+failure of both lists makes all trackers unavailable; unrelated sensors remain
+usable. Polling pauses freeze the last state and reset the absence
 grace period. Restarts restore existing tracker identities and enabled trackers'
 last-seen metadata, but do not restore an assumed presence state. Offline clients
 can remain unknown until the grace period has been confirmed after restart.
