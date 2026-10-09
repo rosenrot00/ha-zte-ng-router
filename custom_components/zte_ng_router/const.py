@@ -1,18 +1,12 @@
 DOMAIN = "zte_ng_router"
 
 CONF_NAME = "name"
-CONF_ROUTER_TYPE = "router_type"
 CONF_VERIFY_TLS = "verify_tls"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_FAST_SCAN_INTERVAL = "fast_scan_interval"
-
-# Supported router types (internal value -> user-facing label)
-ROUTER_TYPES = {
-    "g5tc": "ZTE G5TC",
-    "g5ts": "ZTE G5TS",
-    "g5c": "ZTE G5C",
-    "g5max": "ZTE G5 Max/Ultra",
-}
+CONF_TRACK_WIFI_CLIENTS = "track_wifi_clients"
+CONF_CLIENT_CONSIDER_HOME = "client_consider_home"
+DEFAULT_CLIENT_CONSIDER_HOME = 180  # seconds of confirmed absence
 
 # Slow (full) update interval – used for most sensors
 DEFAULT_SCAN_INTERVAL = 60      # seconds

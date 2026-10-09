@@ -18,12 +18,12 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from .const import (
     DOMAIN,
     CONF_NAME,
-    CONF_ROUTER_TYPE,
     CONF_VERIFY_TLS,
     CONF_SCAN_INTERVAL,
     CONF_FAST_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_FAST_SCAN_INTERVAL,
+    CONF_TRACK_WIFI_CLIENTS,
 )
 from .zte_api import ZteRouterApi
 
@@ -31,7 +31,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-PLATFORMS: list[str] = ["sensor", "button", "switch", "text"]
+PLATFORMS: list[str] = ["sensor", "button", "switch", "text", "device_tracker"]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -53,7 +53,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     options = entry.options
 
     name: str = data[CONF_NAME]
-    router_type: str = data.get(CONF_ROUTER_TYPE, "g5tc")
 
     # Use options if available, otherwise fall back to data
     host: str = options.get(CONF_HOST, data[CONF_HOST])
@@ -75,8 +74,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass,
         base_url=host,
         password=password,
-        router_type=router_type,
         verify_tls=verify_tls,
+        track_wifi_clients=options.get(CONF_TRACK_WIFI_CLIENTS, data.get(CONF_TRACK_WIFI_CLIENTS, False)),
     )
 
     async def _async_update_data() -> dict[str, Any]:
@@ -130,6 +129,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _cancel_polling() -> None:
         """Cancel integration-owned polling timers."""
+        reset_absence = store.get("reset_wifi_client_absence")
+        if callable(reset_absence):
+            reset_absence()
         while poll_unsubs:
             poll_unsubs.pop()()
 

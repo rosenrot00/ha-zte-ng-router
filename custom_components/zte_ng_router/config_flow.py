@@ -8,27 +8,21 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.core import callback
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectOptionDict
 
 from .const import (
     DOMAIN,
     CONF_NAME,
-    CONF_ROUTER_TYPE,
     CONF_VERIFY_TLS,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
     MAX_SCAN_INTERVAL,
+    CONF_TRACK_WIFI_CLIENTS,
+    CONF_CLIENT_CONSIDER_HOME,
+    DEFAULT_CLIENT_CONSIDER_HOME,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-ROUTER_TYPE_OPTIONS: list[SelectOptionDict] = [
-    {"value": "g5tc", "label": "ZTE G5TC"},
-    {"value": "g5ts", "label": "ZTE G5TS"},
-    {"value": "g5c", "label": "ZTE G5C"},
-    {"value": "g5max", "label": "ZTE G5 Max/Ultra"},
-]
 
 
 class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -59,9 +53,12 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_NAME: name,
                         CONF_HOST: host,
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        CONF_ROUTER_TYPE: user_input[CONF_ROUTER_TYPE],
                         CONF_VERIFY_TLS: user_input[CONF_VERIFY_TLS],
                         CONF_SCAN_INTERVAL: scan_interval,
+                        CONF_TRACK_WIFI_CLIENTS: user_input.get(CONF_TRACK_WIFI_CLIENTS, False),
+                        CONF_CLIENT_CONSIDER_HOME: user_input.get(
+                            CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
+                        ),
                     },
                 )
 
@@ -70,13 +67,14 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_NAME, default="ZTE NG Router"): str,
                 vol.Required(CONF_HOST, default="http://192.168.0.1"): str,
                 vol.Required(CONF_PASSWORD): str,
-                vol.Required(CONF_ROUTER_TYPE, default="g5tc"): SelectSelector(
-                    SelectSelectorConfig(options=ROUTER_TYPE_OPTIONS, mode="dropdown")
-                ),
                 vol.Optional(CONF_VERIFY_TLS, default=False): bool,
                 vol.Required(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
+                ),
+                vol.Optional(CONF_TRACK_WIFI_CLIENTS, default=False): bool,
+                vol.Optional(CONF_CLIENT_CONSIDER_HOME, default=DEFAULT_CLIENT_CONSIDER_HOME): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=3600),
                 ),
             }
         )
@@ -109,7 +107,6 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
 
             # Host is always taken from the form
             existing[CONF_HOST] = user_input[CONF_HOST]
-            existing[CONF_ROUTER_TYPE] = user_input[CONF_ROUTER_TYPE]
 
             # Password: only override if user entered something
             new_password = user_input.get(CONF_PASSWORD, "")
@@ -120,6 +117,10 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
             # TLS and scan interval always from the form
             existing[CONF_VERIFY_TLS] = user_input[CONF_VERIFY_TLS]
             existing[CONF_SCAN_INTERVAL] = user_input[CONF_SCAN_INTERVAL]
+            existing[CONF_TRACK_WIFI_CLIENTS] = user_input.get(CONF_TRACK_WIFI_CLIENTS, False)
+            existing[CONF_CLIENT_CONSIDER_HOME] = user_input.get(
+                CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
+            )
 
             return self.async_create_entry(title="", data=existing)
 
@@ -137,10 +138,6 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
             CONF_SCAN_INTERVAL,
             data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
-        current_router_type = options.get(
-            CONF_ROUTER_TYPE,
-            data.get(CONF_ROUTER_TYPE, "g5tc"),
-        )
 
         schema = vol.Schema(
             {
@@ -148,12 +145,6 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
                     CONF_HOST,
                     default=current_host,
                 ): str,
-                vol.Required(
-                    CONF_ROUTER_TYPE,
-                    default=current_router_type,
-                ): SelectSelector(
-                    SelectSelectorConfig(options=ROUTER_TYPE_OPTIONS, mode="dropdown")
-                ),
                 vol.Optional(
                     CONF_PASSWORD,
                     default="",
@@ -169,6 +160,16 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
                 ),
+                vol.Optional(
+                    CONF_TRACK_WIFI_CLIENTS,
+                    default=options.get(CONF_TRACK_WIFI_CLIENTS, data.get(CONF_TRACK_WIFI_CLIENTS, False)),
+                ): bool,
+                vol.Optional(
+                    CONF_CLIENT_CONSIDER_HOME,
+                    default=options.get(CONF_CLIENT_CONSIDER_HOME, data.get(
+                        CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
+                    )),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
             }
         )
 

@@ -195,14 +195,14 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
     def is_on(self) -> bool:
         data = self.coordinator.data or {}
 
-        # Mobile data state in WebUI is derived from WAN connect status, not get_wwaniface.enable.
+        # The primary WAN can be Ethernet; prefer the cellular connection status.
         if self._def.key == "mobile_data":
             wan = data.get("wan") or {}
             wwaniface = data.get("wwaniface") or {}
             status = str(
-                wan.get("current_wan_status")
+                wwaniface.get("connect_status")
                 or wan.get("lte_connect_status")
-                or wwaniface.get("connect_status")
+                or wan.get("current_wan_status")
                 or ""
             )
             return status in {"ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"}

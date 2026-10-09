@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import json
+import ipaddress
+import os
 import re
 import time
 import string
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,6 +25,8 @@ class ZteRouterApi:
     """Async low-level API wrapper for ZTE 5G routers (e.g. G5TC)."""
     _GOFORM_MAX_CONCURRENCY = 8
     _GOFORM_STATIC_FIELDS = frozenset({"hardware_version", "wa_inner_version"})
+    _WIFI_CLIENT_PAGE_SIZE = 64
+    _MAX_WIFI_CLIENTS = 2048
     _GSM7_TABLE_HEX = {
         "000A", "000C", "000D", "0020", "0021", "0022", "0023", "0024", "0025",
         "0026", "0027", "0028", "0029", "002A", "002B", "002C", "002D", "002E",
@@ -48,17 +54,19 @@ class ZteRouterApi:
         hass: HomeAssistant | None = None,
         base_url: str = "",
         password: str = "",
-        router_type: str = "",
         verify_tls: bool = True,
         session: ClientSession | None = None,
+        track_wifi_clients: bool = False,
     ) -> None:
         # base_url like "http://192.168.254.1" or "https://192.168.254.1"
         self.hass = hass
         self.base_url = base_url.rstrip("/")
         self._browser_base_url = self._strip_url_userinfo(self.base_url)
         self.password = password
-        self.router_type = router_type
         self.verify_tls = verify_tls
+        self._sms_encryption: str | None = None
+        self.track_wifi_clients = track_wifi_clients
+        self._wifi_client_snapshot_ok: bool | None = None
 
         self._owns_session = session is None
         if session is not None:
@@ -205,6 +213,118 @@ class ZteRouterApi:
             except UnicodeDecodeError:
                 continue
         return text
+
+    @staticmethod
+    def _decode_sms_number(raw_number: Any) -> str:
+        """Decode UCS2 sender addresses without changing ordinary phone numbers."""
+        text = str(raw_number or "").strip()
+        if not text or len(text) % 4 or not all(c in string.hexdigits for c in text):
+            return text
+        try:
+            decoded = bytes.fromhex(text).decode("utf-16-be").strip("\x00")
+        except (ValueError, UnicodeDecodeError):
+            return text
+        return decoded if decoded.isascii() and decoded.isprintable() else text
+
+    def _update_sms_encryption_from_device(self, *sources: dict[str, Any]) -> None:
+        """Use already-polled firmware identifiers; never issue detection writes."""
+        identity = " ".join(
+            str(source.get(key) or "")
+            for source in sources
+            for key in ("model", "model_name", "hardware_version", "wa_inner_version", "wa_version")
+        ).upper()
+        # Firmware strings append versions directly, e.g. BD_G5TCV1.0 / G5TCHW1.0.
+        suffix = r"(?=$|[^A-Z0-9]|V[0-9]|HW[0-9])"
+        if re.search(r"(?<![A-Z0-9])(?:G51F|MC7510)" + suffix, identity):
+            self._sms_encryption = "aes_gcm"
+        elif self._sms_encryption is None and re.search(
+            r"(?<![A-Z0-9])(?:G5TC|MC8830|G5TS|G5C|G5 ?MAX|G5 ?ULTRA)" + suffix,
+            identity,
+        ):
+            self._sms_encryption = "plain"
+
+    def _decrypt_sms_field(self, value: Any) -> Any:
+        """Recognize encrypted fields only after successful authentication."""
+        if not self._http_encryption_key:
+            return value
+        if not isinstance(value, str) or len(value.strip()) < 40:
+            return value
+
+        from cryptography.exceptions import InvalidTag
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        try:
+            raw = base64.b64decode(value.strip(), validate=True)
+            if len(raw) < 28:
+                return value
+            iv, tag, ciphertext = raw[:12], raw[12:28], raw[28:]
+            plaintext = AESGCM(bytes.fromhex(self._http_encryption_key)).decrypt(
+                iv, ciphertext + tag, None
+            ).decode("utf-8")
+        except (binascii.Error, ValueError, InvalidTag, UnicodeDecodeError):
+            return value
+
+        self._sms_encryption = "aes_gcm"
+        return plaintext
+
+    def _encrypt_sms_field(self, value: str) -> str:
+        """Use base64(12-byte IV + 16-byte tag + ciphertext) when required."""
+        if self._sms_encryption is None:
+            raise ValueError(
+                "Cannot determine SMS encryption from router metadata or inbox; no SMS sent"
+            )
+        if self._sms_encryption != "aes_gcm":
+            return value
+        if not self._http_encryption_key:
+            raise ValueError("SMS encryption requires an established router session key")
+
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        iv = os.urandom(12)
+        sealed = AESGCM(bytes.fromhex(self._http_encryption_key)).encrypt(
+            iv, value.encode("utf-8"), None
+        )
+        return base64.b64encode(iv + sealed[-16:] + sealed[:-16]).decode("ascii")
+
+    @staticmethod
+    def _normalize_sms_capacity(capacity: Any) -> dict[str, Any]:
+        """Prefer the WebUI's component sum over unreliable firmware totals."""
+        if not isinstance(capacity, dict):
+            return {}
+        normalized = dict(capacity)
+        try:
+            counts = [
+                int(capacity[key])
+                for key in ("sms_nv_rev_total", "sms_nv_send_total", "sms_nv_draftbox_total")
+            ]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return normalized
+        if all(count >= 0 for count in counts):
+            normalized["sms_nvused_total"] = sum(counts)
+        return normalized
+
+    def _parse_sms_message(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Normalize SMS addresses and contents for both API backends."""
+        number = self._decrypt_sms_field(msg.get("number"))
+        content = self._decrypt_sms_field(msg.get("content"))
+        decoded = self._decode_sms_content(content)
+        if (
+            self._sms_encryption is None
+            and isinstance(content, str)
+            and re.fullmatch(r"(?:[0-9a-fA-F]{4})+", content)
+            and decoded
+            and all(char.isprintable() or char in "\r\n\t" for char in decoded)
+        ):
+            self._sms_encryption = "plain"
+        return {
+            "id": msg.get("id"),
+            "number": self._decode_sms_number(number),
+            "date": msg.get("date"),
+            "tag": msg.get("tag"),
+            "mem_store": msg.get("mem_store"),
+            "content_raw": msg.get("content"),
+            "content_decoded": decoded,
+        }
 
     @staticmethod
     def parse_sms_compose_input(value: str) -> tuple[str, str]:
@@ -461,9 +581,6 @@ class ZteRouterApi:
             return
 
         try:
-            import base64
-            import os
-
             from cryptography import x509
             from cryptography.hazmat.primitives import serialization
             from cryptography.hazmat.primitives.asymmetric import padding
@@ -512,9 +629,9 @@ class ZteRouterApi:
 
             # WebUI uses CryptoJS WordArray.random(32).toString(Hex): 32 bytes
             # rendered as 64 hex characters.
-            self._http_encryption_key = os.urandom(32).hex()
+            key_hex = os.urandom(32).hex()
             encrypted = public_key.encrypt(
-                self._http_encryption_key.encode("utf-8"),
+                key_hex.encode("utf-8"),
                 padding.PKCS1v15(),
             )
             web_enstr = base64.b64encode(encrypted).decode("ascii")
@@ -534,6 +651,7 @@ class ZteRouterApi:
                 else None
             )
             if set_res.get("success") and set_result not in {"failure", "fail", "false"}:
+                self._http_encryption_key = key_hex
                 _LOGGER.debug("ZTE web_http_enstr_set successful")
             else:
                 _LOGGER.warning(
@@ -722,6 +840,7 @@ class ZteRouterApi:
         }
         fields_to_fetch = [field for field in basic_fields if field not in main]
         main.update(await self._async_goform_get_fields(fields_to_fetch))
+        self._update_sms_encryption_from_device(main)
 
         for field in self._GOFORM_STATIC_FIELDS:
             value = main.get(field)
@@ -870,15 +989,7 @@ class ZteRouterApi:
         for msg in raw_messages:
             if not isinstance(msg, dict):
                 continue
-            sms_messages.append({
-                "id": msg.get("id"),
-                "number": msg.get("number"),
-                "date": msg.get("date"),
-                "tag": msg.get("tag"),
-                "mem_store": msg.get("mem_store"),
-                "content_raw": msg.get("content"),
-                "content_decoded": self._decode_sms_content(msg.get("content")),
-            })
+            sms_messages.append(self._parse_sms_message(msg))
 
         bands_summary, total_bw_mhz = self._compute_bands_and_bw(netinfo)
         return {
@@ -1529,14 +1640,66 @@ class ZteRouterApi:
                 z_mode_override=action.get("z_mode_override"),
             )
 
+    @staticmethod
+    def firmware_update_action(info: dict[str, Any]) -> dict[str, Any] | None:
+        """Choose only WebUI-defined update actions for explicitly ready states."""
+        upgrade = str(info.get("current_upgrade_state") or "").strip()
+        if upgrade == "download_completed":
+            return {"service": "zwrt_fota_res.api", "method": "start_update",
+                    "params": {"moduleName": "zte_web"}}
+        available = str(info.get("new_version_state") or "").strip() in {
+            "1", "version_has_new_critical_software", "version_has_new_optional_software",
+        }
+        if available and upgrade in {"", "idle", "fota_idle", "upgrade_pack_redownload"}:
+            return {"service": "zwrt_zte_dm", "method": "confirm_download", "params": {}}
+        return None
+
+    async def _async_firmware_command_locked(self, call: dict[str, Any]) -> bool:
+        """Never replay an update command after an ambiguous transport failure."""
+        result = await self.async_call_ubus(call, retry_on_connreset_104=False)
+        if not result.get("success"):
+            _LOGGER.warning("Firmware command %s failed: %s", call["method"], result.get("error"))
+            return False
+        data = result.get("data")
+        if isinstance(data, dict) and "result" in data:
+            return str(data["result"]).lower() in {"0", "success", "true"}
+        return data is None or isinstance(data, dict)
+
+    async def async_check_firmware_update(self) -> bool:
+        """Request a version check only; never approve a download or installation."""
+        async with self._request_lock:
+            await self._async_ensure_logged_in()
+            if self._api_mode != "ubus":
+                raise ValueError("Manual firmware checks are not supported by this router API")
+            return await self._async_firmware_command_locked(
+                self.build_ubus_call("zwrt_zte_dm", "check_new_version")
+            )
+
+    async def async_start_firmware_update(self) -> bool:
+        """Start only on an explicit user request after rechecking current state."""
+        async with self._request_lock:
+            await self._async_ensure_logged_in()
+            if self._api_mode != "ubus":
+                raise ValueError("Firmware installation is not supported by this router API")
+            result = await self.async_call_ubus(
+                self.build_ubus_call("zwrt_zte_dm", "get_update_info"), z_mode_override="0"
+            )
+            info = result.get("data")
+            if not result.get("success") or not isinstance(info, dict):
+                raise ValueError("Cannot verify firmware update status; no update started")
+            call = self.firmware_update_action(info)
+            if call is None:
+                raise ValueError("No firmware update is ready, or an update is already in progress")
+            return await self._async_firmware_command_locked(call)
+
     async def async_update_fast(self) -> dict[str, Any] | None:
-        """Fetch only fast-changing stats (WAN rates/time + CPU usage).
+        """Fetch fast-changing stats (WAN rates/time/counters + CPU/RAM usage).
 
         Keeps the payload small and avoids polling heavy endpoints at high frequency.
         Returns a partial data dict containing at least:
           - "wan": router_get_status payload
           - "wwandst": get_wwandst(type=4) payload (for real_time on firmwares that omit it in router_get_status)
-          - "device": get_device_info(cpuinfo) payload
+          - "device": get_device_info(cpuinfo, meminfo) payload
         """
         async with self._request_lock:
             return await self._async_update_fast_locked()
@@ -1566,7 +1729,7 @@ class ZteRouterApi:
             {
                 "service": "zwrt_mc.device.manager",
                 "method": "get_device_info",
-                "params": {"deviceInfoList": ["cpuinfo"]},
+                "params": {"deviceInfoList": ["cpuinfo", "meminfo"]},
             },
         ]
 
@@ -1590,6 +1753,93 @@ class ZteRouterApi:
     # --------------------------------------------------------------------
     # Public API used by the HA DataUpdateCoordinator
     # --------------------------------------------------------------------
+    @staticmethod
+    def normalize_client_mac(value: Any) -> str | None:
+        """Normalize unicast MAC addresses, including private/randomized ones."""
+        if not isinstance(value, str):
+            return None
+        compact = re.sub(r"[:.\-]", "", value.strip()).lower()
+        if not re.fullmatch(r"[0-9a-f]{12}", compact):
+            return None
+        if compact == "0" * 12 or int(compact[:2], 16) & 1:
+            return None
+        return ":".join(compact[i:i + 2] for i in range(0, 12, 2))
+
+    @staticmethod
+    def _normalize_wifi_client(row: Any) -> dict[str, Any] | None:
+        if not isinstance(row, dict):
+            return None
+        mac = ZteRouterApi.normalize_client_mac(row.get("mac_address"))
+        if mac is None:
+            return None
+
+        def text(field: str) -> str | None:
+            value = row.get(field)
+            if isinstance(value, str):
+                return value.strip()[:255] or None
+            return None
+
+        def address(field: str, version: int) -> str | None:
+            try:
+                value = ipaddress.ip_address(text(field) or "")
+                return str(value) if value.version == version and not value.is_unspecified else None
+            except ValueError:
+                return None
+
+        return {"mac_address": mac, "hostname": text("hostname"),
+                "ip_address": address("ip_address", 4), "ipv6_address": address("ipv6_address", 6),
+                "interface_type": str(row["interface_type"]) if isinstance(row.get("interface_type"), int)
+                                  else text("interface_type")}
+
+    @classmethod
+    def _wifi_client_counts(cls, data: Any) -> tuple[int, int] | None:
+        if not isinstance(data, dict):
+            return None
+        values = []
+        for field in ("access_total_num", "wireless_num"):
+            value = data.get(field)
+            if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)):
+                return None
+            values.append(int(value))
+        total, wireless = values
+        return (total, wireless) if 0 <= wireless <= total <= cls._MAX_WIFI_CLIENTS else None
+
+    async def _async_read_wifi_clients_locked(self, initial_counts: Any) -> dict[str, Any] | None:
+        """Read a complete WLAN snapshot; never turn partial data into absence."""
+        counts = self._wifi_client_counts(initial_counts)
+        if self._api_mode != "ubus" or counts is None:
+            return None
+        total, wireless = counts
+        # Match the WebUI's total-count pagination, then verify the WLAN count.
+        calls = [self.build_ubus_call("zwrt_router.api", "router_wireless_access_list", {
+            "start_id": start, "end_id": start + self._WIFI_CLIENT_PAGE_SIZE - 1,
+        }) for start in range(1, total + 1, self._WIFI_CLIENT_PAGE_SIZE)] if wireless else []
+        calls.append(self.build_ubus_call("zwrt_router.api", "router_get_user_list_num"))
+        results = await self.async_call_ubus_batch(
+            calls, batch_name="wifi_clients", z_mode_override="0",
+            log_raw_response=False, retry_on_access_denied=False,
+        )
+        if len(results) != len(calls) or any(not r.get("success") for r in results):
+            return None
+        final_counts = self._wifi_client_counts(results[-1].get("data"))
+        if final_counts != counts:
+            return None
+        clients: dict[str, dict[str, Any]] = {}
+        for result in results[:-1]:
+            payload = result.get("data")
+            rows = payload.get("wireless_access_list_info") if isinstance(payload, dict) else None
+            if not isinstance(rows, list) or len(rows) > self._WIFI_CLIENT_PAGE_SIZE:
+                return None
+            for row in rows:
+                client = self._normalize_wifi_client(row)
+                if client is None:
+                    return None
+                clients[client["mac_address"]] = client
+        if len(clients) != wireless:
+            return None
+        _LOGGER.debug("Read complete WLAN client snapshot: count=%s", len(clients))
+        return {"clients": clients, "observed_at": datetime.now(timezone.utc)}
+
     async def async_update_all(self) -> dict[str, Any]:
         """Fetch all relevant router data for Home Assistant in one go."""
         async with self._request_lock:
@@ -1639,6 +1889,12 @@ class ZteRouterApi:
                 "method": "get_wwandst",
                 "params": {"source_module": "web", "cid": 1, "type": 2},
             },
+            self.build_ubus_call("zwrt_data", "get_wwandst_monthlimit", {
+                "source_module": "web", "cid": 1,
+            }),
+            self.build_ubus_call("zwrt_data", "get_wwandst_clearday", {
+                "source_module": "web", "cid": 1,
+            }),
         ]
         sms_batch_calls = [
             {
@@ -1661,6 +1917,27 @@ class ZteRouterApi:
 
         core_results = await self.async_call_ubus_batch(core_batch_calls, batch_name="core")
         monthly_results = await self.async_call_ubus_batch(monthly_batch_calls, batch_name="monthly")
+        metadata_results = await self.async_call_ubus_batch(
+            [
+                self.build_ubus_call("zwrt_zte_dm", "get_update_info"),
+                self.build_ubus_call("uci", "get", {
+                    "config": "zwrt_zte_topsw_gnss_gen", "section": "INFO",
+                }),
+            ],
+            batch_name="firmware_gnss",
+            z_mode_override="0",
+            log_raw_response=False,
+            retry_on_access_denied=False,
+        )
+        # Coordinates are private; never put the metadata batch into raw debug logs.
+        firmware_res, gnss_res = metadata_results
+        firmware = firmware_res.get("data")
+        if not firmware_res.get("success") or not isinstance(firmware, dict):
+            firmware = None
+        gnss = gnss_res.get("data")
+        gnss = gnss.get("values") if gnss_res.get("success") and isinstance(gnss, dict) else None
+        if not isinstance(gnss, dict):
+            gnss = {}
         # SMS reads need Z-Mode=0 on this firmware. Keep them batched, but do
         # not dump raw SMS bodies to debug logs.
         sms_results = await self.async_call_ubus_batch(
@@ -1674,7 +1951,15 @@ class ZteRouterApi:
         self._log_batch_failures("monthly", monthly_batch_calls, monthly_results)
         self._log_batch_failures("sms", sms_batch_calls, sms_results)
 
-        results = [*core_results, *monthly_results, *sms_results]
+        wwandst_monthly_res, monthlimit_res, clearday_res = monthly_results
+        data_limit = monthlimit_res.get("data")
+        if not monthlimit_res.get("success") or not isinstance(data_limit, dict):
+            data_limit = {}
+        traffic_reset = clearday_res.get("data")
+        if not clearday_res.get("success") or not isinstance(traffic_reset, dict):
+            traffic_reset = {}
+
+        results = [*core_results, wwandst_monthly_res, *sms_results]
         (
             netinfo_res,
             wlan_res,
@@ -1698,7 +1983,23 @@ class ZteRouterApi:
         wan = wan_res.get("data") or {}
         sim_info = sim_info_res.get("data") or {}
         user_list_num = user_list_num_res.get("data") or {}
+        wifi_clients = None
+        if self.track_wifi_clients:
+            try:
+                wifi_clients = await self._async_read_wifi_clients_locked(
+                    user_list_num if user_list_num_res.get("success") else None
+                )
+            except Exception:
+                # Client tracking is optional; do not fail unrelated sensors/SMS.
+                _LOGGER.debug("WLAN client snapshot unavailable")
+            snapshot_ok = wifi_clients is not None
+            if not snapshot_ok and self._wifi_client_snapshot_ok is not False:
+                _LOGGER.warning("WLAN client tracking unavailable: incomplete or unsupported client list")
+            elif snapshot_ok and self._wifi_client_snapshot_ok is False:
+                _LOGGER.info("WLAN client tracking recovered")
+            self._wifi_client_snapshot_ok = snapshot_ok
         common_config = (uci_common_res.get("data") or {}).get("values") or {}
+        self._update_sms_encryption_from_device(common_config, dev_res.get("data") or {})
         odu_led = odu_led_res.get("data") or {}
         wifi_module = (wifi_module_res.get("data") or {}).get("values") or {}
         wifi_main_2g = (uci_wifi_2g_res.get("data") or {}).get("values") or {}
@@ -1707,24 +2008,14 @@ class ZteRouterApi:
         wwaniface = wwaniface_res.get("data") or {}
         wwandst_monthly = wwandst_monthly_res.get("data") or {}
         sms_payload = sms_res.get("data") or {}
-        sms_capacity = sms_capacity_res.get("data") or {}
+        sms_capacity = self._normalize_sms_capacity(sms_capacity_res.get("data"))
         raw_messages = sms_payload.get("messages") or []
         sms_messages: list[dict[str, Any]] = []
         if isinstance(raw_messages, list):
             for msg in raw_messages:
                 if not isinstance(msg, dict):
                     continue
-                sms_messages.append(
-                    {
-                        "id": msg.get("id"),
-                        "number": msg.get("number"),
-                        "date": msg.get("date"),
-                        "tag": msg.get("tag"),
-                        "mem_store": msg.get("mem_store"),
-                        "content_raw": msg.get("content"),
-                        "content_decoded": self._decode_sms_content(msg.get("content")),
-                    }
-                )
+                sms_messages.append(self._parse_sms_message(msg))
 
         netinfo = netinfo_res.get("data") or {}
         bands_summary, total_bw_mhz = self._compute_bands_and_bw(netinfo)
@@ -1744,13 +2035,18 @@ class ZteRouterApi:
             "common_config": common_config,
             "wan": wan,
             "user_list_num": user_list_num,
+            "wifi_clients": wifi_clients,
             "wwandst": wwandst,
             "wwaniface": wwaniface,
             "wwandst_monthly": wwandst_monthly,
+            "data_limit": data_limit,
+            "traffic_reset": traffic_reset,
+            "firmware": firmware,
+            "gnss": gnss,
             "sms": {
                 "messages": sms_messages,
                 "latest": sms_messages[0] if sms_messages else None,
-                "capacity": sms_capacity if isinstance(sms_capacity, dict) else {},
+                "capacity": sms_capacity,
             },
             # derived fields
             "bands_summary": bands_summary,
@@ -1967,19 +2263,31 @@ class ZteRouterApi:
         message: str,
         *,
         sms_id: str = "0",
+        retry_on_access_denied: bool = True,
     ) -> bool:
         """Send SMS while the shared router request lock is held."""
+        await self._async_ensure_logged_in()
         payload = {
-            "number": number,
+            "number": self._encrypt_sms_field(number),
             "sms_time": self._build_sms_time_string(),
-            "message_body": self._encode_sms_message(message),
+            "message_body": self._encrypt_sms_field(self._encode_sms_message(message)),
             "id": str(sms_id),
             "encode_type": self._get_sms_encode_type(message),
         }
 
         send_call = self.build_ubus_call("zwrt_wms", "zte_libwms_send_sms", payload)
-        send_res = await self.async_call_ubus(send_call)
+        # A login rotates the encryption key. Rebuild instead of replaying the
+        # ciphertext, and never resend after an ambiguous transport failure.
+        send_res = await self.async_call_ubus(
+            send_call, retry_on_access_denied=False, retry_on_connreset_104=False
+        )
         if not send_res.get("success"):
+            error = send_res.get("error") or {}
+            if retry_on_access_denied and error.get("code") == -32002:
+                await self._async_ensure_logged_in(force=True)
+                return await self._async_send_sms_locked(
+                    number, message, sms_id=sms_id, retry_on_access_denied=False
+                )
             return False
 
         status_call = self.build_ubus_call("zwrt_wms", "zwrt_wms_get_cmd_status", {"sms_cmd": 4})
@@ -1992,6 +2300,10 @@ class ZteRouterApi:
                 if cmd_result == "3":
                     return True
                 if cmd_result == "2":
+                    _LOGGER.warning(
+                        "Router reported SMS send failure (status 2; encryption=%s)",
+                        "aes_gcm" if payload["number"] != number else "plain",
+                    )
                     return False
             await asyncio.sleep(1)
 

@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ZTE NG Router",
+        "data": {
+          "name": "Name",
+          "host": "Router-URL",
+          "password": "Router-Passwort",
+          "verify_tls": "TLS-Zertifikat pruefen",
+          "scan_interval": "Langsames Abfrageintervall (Sekunden)",
+          "track_wifi_clients": "WLAN-Geraete verfolgen",
+          "client_consider_home": "Abwesenheitsfrist fuer WLAN-Geraete (Sekunden)"
+        },
+        "data_description": {
+          "track_wifi_clients": "WLAN-Geraete beim langsamen Polling ausschliesslich lesen. Neue Tracker sind deaktiviert, bis du sie in den Entitaetseinstellungen aktivierst.",
+          "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend. Standard 180 Sekunden; Fehler und Polling-Pausen setzen die Frist zurueck."
+        }
+      }
+    },
+    "error": {"invalid_scan_interval": "Das Abfrageintervall muss zwischen 5 und 3600 Sekunden liegen."},
+    "abort": {"already_configured": "Dieser Router ist bereits eingerichtet."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ZTE NG Router Optionen",
+        "data": {
+          "host": "Router-URL",
+          "password": "Neues Router-Passwort (leer lassen zum Beibehalten)",
+          "verify_tls": "TLS-Zertifikat pruefen",
+          "scan_interval": "Langsames Abfrageintervall (Sekunden)",
+          "track_wifi_clients": "WLAN-Geraete verfolgen",
+          "client_consider_home": "Abwesenheitsfrist fuer WLAN-Geraete (Sekunden)"
+        },
+        "data_description": {
+          "track_wifi_clients": "WLAN-Geraete beim langsamen Polling ausschliesslich lesen. Gewuenschte Tracker unter Einstellungen > Geraete & Dienste > Entitaeten aktivieren; deaktivierte Entitaeten einblenden.",
+          "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend (0-3600 Sekunden). Fehler und Polling-Pausen setzen die Frist zurueck."
+        }
+      }
+    }
+  }
+}

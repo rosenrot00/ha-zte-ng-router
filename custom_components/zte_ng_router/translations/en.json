@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ZTE NG Router",
+        "data": {
+          "name": "Name",
+          "host": "Router URL",
+          "password": "Router password",
+          "verify_tls": "Verify TLS certificate",
+          "scan_interval": "Slow polling interval (seconds)",
+          "track_wifi_clients": "Track Wi-Fi clients",
+          "client_consider_home": "Wi-Fi client absence grace period (seconds)"
+        },
+        "data_description": {
+          "track_wifi_clients": "Read-only WLAN device discovery during slow polling. New trackers are disabled until enabled in the entity settings.",
+          "client_consider_home": "Confirmed absence before reporting a client away. Default 180 seconds; errors and polling pauses reset the grace period."
+        }
+      }
+    },
+    "error": {"invalid_scan_interval": "The polling interval must be between 5 and 3600 seconds."},
+    "abort": {"already_configured": "This router is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ZTE NG Router Options",
+        "data": {
+          "host": "Router URL",
+          "password": "New router password (leave empty to keep current)",
+          "verify_tls": "Verify TLS certificate",
+          "scan_interval": "Slow polling interval (seconds)",
+          "track_wifi_clients": "Track Wi-Fi clients",
+          "client_consider_home": "Wi-Fi client absence grace period (seconds)"
+        },
+        "data_description": {
+          "track_wifi_clients": "Read-only WLAN device discovery during slow polling. Enable wanted trackers under Settings > Devices & services > Entities, including disabled entities.",
+          "client_consider_home": "Confirmed absence before reporting a client away (0-3600 seconds). Errors and polling pauses reset the grace period."
+        }
+      }
+    }
+  }
+}

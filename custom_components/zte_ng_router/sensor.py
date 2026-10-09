@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
+import re
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -9,6 +11,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
+    DEGREE,
     PERCENTAGE,
     UnitOfDataRate,
     UnitOfInformation,
@@ -92,6 +95,22 @@ SENSOR_DEFS = [
     ("upload_rate", "Upload Rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
     ("monthly_download_mb", "Monthly Download", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.MEASUREMENT),
     ("monthly_upload_mb", "Monthly Upload", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.MEASUREMENT),
+    ("daily_download", "Daily Download", SensorDeviceClass.DATA_SIZE,
+     UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
+    ("daily_upload", "Daily Upload", SensorDeviceClass.DATA_SIZE,
+     UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
+    ("data_limit_enabled", "Data Limit Enabled", None, None, None),
+    ("data_limit_type", "Data Limit Type", None, None, None),
+    ("data_limit_value", "Data Limit Value", None, None, None),
+    ("data_limit_warning_percent", "Data Limit Warning Threshold", None, PERCENTAGE,
+     SensorStateClass.MEASUREMENT),
+    ("data_limit_exceeded", "Data Limit Exceeded", None, None, None),
+    ("traffic_auto_reset", "Traffic Auto Reset Enabled", None, None, None),
+    ("traffic_reset_day", "Traffic Reset Day", None, None, None),
+    ("rx_packet_errors", "Received Packet Errors", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("tx_packet_errors", "Transmitted Packet Errors", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("rx_packet_drops", "Received Packet Drops", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("tx_packet_drops", "Transmitted Packet Drops", None, None, SensorStateClass.TOTAL_INCREASING),
     ("sms_count", "SMS Count", None, None, SensorStateClass.MEASUREMENT),
     ("sms_unread_total", "SMS Unread", None, None, SensorStateClass.MEASUREMENT),
     ("sms_nv_total", "SMS NV Total", None, None, SensorStateClass.MEASUREMENT),
@@ -103,10 +122,18 @@ SENSOR_DEFS = [
     ("hardware_version", "Hardware Version", None, None, None),
     ("wa_inner_version", "WA Inner Version", None, None, None),
     ("cpu_usage", "CPU Usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
+    ("ram_usage", "RAM Usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
     ("cpu_temp", "CPU Temperature", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
     ("uptime", "Device Started", SensorDeviceClass.TIMESTAMP,
      None, None),
+    ("firmware_update_status", "Firmware Update Status", None, None, None),
+    ("firmware_latest_version", "Firmware Latest Version", None, None, None),
+    ("firmware_download_progress", "Firmware Download Progress", None, PERCENTAGE,
+     SensorStateClass.MEASUREMENT),
+    ("gnss_latitude", "GNSS Latitude", None, DEGREE, None),
+    ("gnss_longitude", "GNSS Longitude", None, DEGREE, None),
+    ("gnss_fix", "GNSS Fix", None, None, None),
 ]
 
 
@@ -119,8 +146,6 @@ DIAGNOSTIC_SENSOR_KEYS = {
     # Network identifiers and lock/debug values.
     "rmcc",
     "rmnc",
-    "nr_active_band",
-    "lte_primary_band",
     "nr5g_cell_id",
     "lac_code",
     "lte_band_lock",
@@ -143,7 +168,6 @@ DIAGNOSTIC_SENSOR_KEYS = {
     # Interface and device health details.
     "wan_ipv4",
     "wan_ipv6",
-    "wan_link_state",
     "modem_main_state",
     "radio_off",
     "hightemp_datalimit_status",
@@ -154,14 +178,47 @@ DIAGNOSTIC_SENSOR_KEYS = {
     "hardware_version",
     "wa_inner_version",
     "cpu_usage",
+    "ram_usage",
     "cpu_temp",
     "uptime",
+    "rx_packet_errors",
+    "tx_packet_errors",
+    "rx_packet_drops",
+    "tx_packet_drops",
+    "data_limit_enabled",
+    "data_limit_type",
+    "data_limit_value",
+    "data_limit_warning_percent",
+    "traffic_auto_reset",
+    "traffic_reset_day",
+    "firmware_update_status",
+    "firmware_latest_version",
+    "firmware_download_progress",
+    "gnss_latitude",
+    "gnss_longitude",
+    "gnss_fix",
 
     # SMS storage internals; unread/latest/count remain normal sensors.
     "sms_nv_total",
     "sms_sim_total",
     "sms_nv_used_total",
 }
+
+
+G5TC_OPTIONAL_SENSOR_KEYS = {
+    "5g_modem_temperature",
+    "modem_temperature",
+    "pa_temp_level",
+    "tj_temp_level",
+}
+
+
+# Traffic counters share the fast rate response; RAM shares the CPU request.
+FAST_SENSOR_KEYS = frozenset({
+    "connected_time", "download_rate", "upload_rate", "cpu_usage", "ram_usage",
+    "daily_download", "daily_upload",
+    "rx_packet_errors", "tx_packet_errors", "rx_packet_drops", "tx_packet_drops",
+})
 
 
 def _as_number(value: Any) -> Any:
@@ -197,12 +254,75 @@ def _to_bit_per_s(value: Any) -> Any:
 
 def _bytes_counter(value: Any) -> Any:
     """Normalize byte counter to integer bytes."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
     v = _as_number(value)
     if v is None:
         return None
-    if v < 0:
+    if not math.isfinite(v) or v < 0:
         return None
     return int(v)
+
+
+def _data_limit_value(data: dict[str, Any], key: str) -> Any:
+    """Expose read-only limit settings without inventing a volume unit."""
+    limit = data.get("data_limit") or {}
+    reset = data.get("traffic_reset") or {}
+    flags = {
+        "data_limit_enabled": limit.get("enable"),
+        "data_limit_exceeded": limit.get("overflow"),
+        "traffic_auto_reset": reset.get("enable"),
+    }
+    if key in flags:
+        return {"0": "off", "1": "on"}.get(_as_text(flags[key]))
+    if key == "data_limit_type":
+        return {"1": "connection_time", "2": "data_volume"}.get(_as_text(limit.get("type")))
+    if key == "data_limit_value":
+        value = limit.get("value")
+        # Preserve integer precision; reject fractional, negative or non-finite limits.
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) or isinstance(value, str) and value.strip().isdigit():
+            return _bytes_counter(value)
+        number = _as_number(value)
+        if number is None or not math.isfinite(number) or number < 0 or number != int(number):
+            return None
+        return _bytes_counter(value)
+    if key == "data_limit_warning_percent":
+        value = _as_number(limit.get("ratio"))
+        return value if value is not None and math.isfinite(value) and 0 <= value <= 100 else None
+    if key == "traffic_reset_day":
+        value = _as_number(reset.get("clearday"))
+        if value is not None and math.isfinite(value) and 1 <= value <= 31 and value == int(value):
+            return int(value)
+        return None
+    return None
+
+
+def _ram_usage(meminfo: Any) -> int | None:
+    """Match the WebUI: 100 - Math.round(100 * avaliable / total)."""
+    if not isinstance(meminfo, dict):
+        return None
+    total = _as_number(meminfo.get("total"))
+    available = _first_number(meminfo.get("avaliable"), meminfo.get("available"))
+    if total is None or available is None:
+        return None
+    if not math.isfinite(total) or not math.isfinite(available):
+        return None
+    total, available = int(total), int(available)
+    if total <= 0 or not 0 <= available <= total:
+        return None
+    return 100 - math.floor(100 * available / total + 0.5)
+
+
+def _gnss_coordinate(data: dict[str, Any], key: str) -> float | None:
+    field, limit = ("LAT", 90) if key == "gnss_latitude" else ("LON", 180)
+    value = _as_number((data.get("gnss") or {}).get(field))
+    if value is None or not math.isfinite(value) or not -limit <= value <= limit:
+        return None
+    return value
 
 
 def _as_text(value: Any) -> str | None:
@@ -682,6 +802,45 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
             v = wan.get("month_tx_bytes")
         return _bytes_counter(v)
 
+    traffic_fields = {
+        "daily_download": "day_rx_bytes",
+        "daily_upload": "day_tx_bytes",
+        "rx_packet_errors": "total_rx_error_packets",
+        "tx_packet_errors": "total_tx_error_packets",
+        "rx_packet_drops": "total_rx_drop_packets",
+        "tx_packet_drops": "total_tx_drop_packets",
+    }
+    if key in traffic_fields:
+        return _bytes_counter((data.get("wwandst") or {}).get(traffic_fields[key]))
+
+    if key.startswith("data_limit_") or key in {"traffic_auto_reset", "traffic_reset_day"}:
+        return _data_limit_value(data, key)
+
+    if key == "ram_usage":
+        return _ram_usage(device.get("meminfo"))
+
+    firmware = data.get("firmware") or {}
+    if key == "firmware_update_status":
+        upgrade = _as_text(firmware.get("current_upgrade_state"))
+        if upgrade and upgrade not in {"fota_idle", "idle"}:
+            return upgrade
+        return _as_text(firmware.get("new_version_state")) or upgrade
+    if key == "firmware_latest_version":
+        version = _as_text(firmware.get("dm_new_version"))
+        return None if version in {"version_number_abnormal", "0"} else version
+    if key == "firmware_download_progress":
+        total = _as_number(firmware.get("dm_pkg_total_size"))
+        downloaded = _as_number(firmware.get("dm_download_pkg_size"))
+        if total is None or downloaded is None or not math.isfinite(total) or not math.isfinite(downloaded):
+            return None
+        if total <= 0 or downloaded < 0:
+            return None
+        return round(min(100, 100 * downloaded / total), 1)
+    if key in {"gnss_latitude", "gnss_longitude"}:
+        return _gnss_coordinate(data, key)
+    if key == "gnss_fix":
+        return _as_text((data.get("gnss") or {}).get("FIX"))
+
     if key == "sms_count":
         messages = sms.get("messages") or []
         return len(messages) if isinstance(messages, list) else 0
@@ -746,6 +905,20 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
     return None
 
 
+def _sensor_enabled_by_default(data: dict[str, Any], key: str) -> bool:
+    """Hide missing G5TC thermal values by default, without dropping entities."""
+    if key not in G5TC_OPTIONAL_SENSOR_KEYS:
+        return True
+    identity = " ".join(
+        str(source.get(field) or "")
+        for source in (data.get("common_config") or {}, data.get("device") or {})
+        for field in ("model", "model_name", "hardware_version", "wa_inner_version", "wa_version")
+    ).upper()
+    if not re.search(r"(?<![A-Z0-9])G5TC(?=$|[^A-Z0-9]|V[0-9]|HW[0-9])", identity):
+        return True
+    return _extract_value(data, key) is not None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -755,14 +928,13 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: DataUpdateCoordinator = data["coordinator"]
     coordinator_fast: DataUpdateCoordinator | None = data.get("coordinator_fast")
-    fast_keys = {"connected_time", "download_rate", "upload_rate", "cpu_usage"}
     router_name: str = data["name"]  # name given in config flow
 
     entities: list[ZteNgRouterSensor] = []
     for key, name, dev_class, unit, state_class in SENSOR_DEFS:
         use_coordinator = (
             coordinator_fast
-            if coordinator_fast is not None and key in fast_keys
+            if coordinator_fast is not None and key in FAST_SENSOR_KEYS
             else coordinator
         )
 
@@ -823,6 +995,10 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
             self._attr_state_class = state_class
         if key in DIAGNOSTIC_SENSOR_KEYS:
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        # HA applies this only when registering a new entity, preserving user choices.
+        self._attr_entity_registry_enabled_default = _sensor_enabled_by_default(
+            coordinator.data or {}, key
+        )
 
     @property
     def native_value(self) -> Any:
@@ -858,10 +1034,24 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        data: dict[str, Any] = self.coordinator.data or {}
+        if self._key == "data_limit_value":
+            limit_type = _extract_value(data, "data_limit_type")
+            return {"limit_type": limit_type,
+                    "value_unit": "s" if limit_type == "connection_time" else
+                                  "router_native" if limit_type == "data_volume" else None}
+        if self._key in {"gnss_latitude", "gnss_longitude", "gnss_fix"}:
+            gnss = data.get("gnss") or {}
+            return {"fix": _as_text(gnss.get("FIX")),
+                    "source": _as_text(gnss.get("SOURCE")),
+                    "fix_time": _as_text(gnss.get("FIX_TIME"))}
+        if self._key == "firmware_update_status":
+            firmware = data.get("firmware") or {}
+            return {"new_version_state": firmware.get("new_version_state"),
+                    "current_upgrade_state": firmware.get("current_upgrade_state")}
         if self._key != "sms_latest":
             return None
 
-        data: dict[str, Any] = self.coordinator.data or {}
         sms = data.get("sms") or {}
         capacity = sms.get("capacity") or {}
         messages = sms.get("messages") or []
