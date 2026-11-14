@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -120,8 +121,12 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
                 for mac in sorted(new)
             ])
 
+    @callback
+    def remove_absence_reset() -> None:
+        store.pop("reset_client_absence", None)
+
     store["reset_client_absence"] = tracking.reset_absence
-    entry.async_on_unload(lambda: store.pop("reset_client_absence", None))
+    entry.async_on_unload(remove_absence_reset)
     entry.async_on_unload(coordinator.async_add_listener(update_clients))
     update_clients()
 
@@ -159,6 +164,10 @@ class ZteNetworkClientTracker(CoordinatorEntity, ScannerEntity, RestoreEntity):
     @property
     def mac_address(self) -> str:
         return self._mac
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(connections={(CONNECTION_NETWORK_MAC, self._mac)})
 
     @property
     def hostname(self) -> str | None:

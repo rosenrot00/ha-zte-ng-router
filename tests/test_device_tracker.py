@@ -1,4 +1,5 @@
 """Offline WLAN/LAN tracker tests; no real router settings are touched."""
+import asyncio
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,10 @@ def load_trackers():
             "SourceType": types.SimpleNamespace(ROUTER="router"),
         },
         "homeassistant.core": {"callback": lambda f: f},
+        "homeassistant.helpers.device_registry": {
+            "CONNECTION_NETWORK_MAC": "mac",
+            "DeviceInfo": dict,
+        },
         "homeassistant.helpers.update_coordinator": {"CoordinatorEntity": CoordinatorEntity},
         "homeassistant.helpers.restore_state": {"RestoreEntity": RestoreEntity},
         "zte_tracker_test.zte_api": {"ZteRouterApi": ZteRouterApi},
@@ -385,10 +390,25 @@ class TrackerPlatformTests(unittest.IsolatedAsyncioTestCase):
         coordinator.data = {"network_clients": None}
         listeners[0]()
         self.assertFalse(entity.available)
-        for unload in unloads:
-            unload()
+        # Home Assistant schedules non-empty unload results as coroutines.
+        while unloads:
+            if job := unloads.pop()():
+                await asyncio.create_task(job)
         self.assertEqual(listeners, [])
         self.assertNotIn("reset_client_absence", store)
+        await trackers.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(len(listeners), 1)
+        self.assertEqual(entities[-1].unique_id, entity.unique_id)
+
+    async def test_device_info_identifies_the_client_by_mac_even_when_offline(self):
+        hass, entry, coordinator, _, listeners, _ = self.setup(data={"network_clients": snapshot()})
+        entities = []
+        await trackers.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(entities[0].device_info.get("connections"), {("mac", MAC)})
+        coordinator.data = {"network_clients": None}
+        listeners[0]()
+        self.assertFalse(entities[0].available)
+        self.assertEqual(entities[0].device_info.get("connections"), {("mac", MAC)})
 
     async def test_pause_hook_restarts_grace_and_discovery_continues(self):
         hass, entry, coordinator, store, listeners, _ = self.setup(data={"network_clients": snapshot()})
