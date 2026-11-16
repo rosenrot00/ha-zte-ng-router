@@ -1,6 +1,7 @@
 """Feature regressions using synthetic data only, never real router actions."""
 
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
@@ -187,6 +188,121 @@ class PollingGroupTests(unittest.IsolatedAsyncioTestCase):
                            "rx_packet_errors": 2, "tx_packet_errors": 3,
                            "rx_packet_drops": 4, "tx_packet_drops": 5}.items():
             self.assertEqual(sensors._extract_value(data, key), value)
+
+
+class OptionalCorePollTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unsupported_reads_back_off_without_shifting_other_results(self):
+        router = api()
+        core_calls = []
+
+        async def batch(calls, *, batch_name, **_):
+            if batch_name == "core":
+                core_calls.append(calls)
+            responses = []
+            for call in calls:
+                section = call.get("params", {}).get("section")
+                method = call["method"]
+                error = None
+                payload = {}
+                if section == "main_2g" and len(core_calls) == 1:
+                    error = {"ubus_status": 4}
+                elif section == "main_2g":
+                    payload = {"values": {"disabled": "0"}}
+                elif section == "main_5g":
+                    error = {"code": -32002}
+                elif method == "get_ODU_switch_state":
+                    error = {"code": -32601}
+                elif section == "common_config":
+                    payload = {"values": {"hardware_version": "G5TSHW_1.0.0"}}
+                elif method == "router_get_status":
+                    payload = {"current_wan_status": "ipv4_connected"}
+                responses.append({"success": error is None, "error": error, "data": payload})
+            return responses
+
+        router.async_call_ubus_batch = AsyncMock(side_effect=batch)
+        with self.assertNoLogs("zte_sms_test_api", "WARNING"):
+            with self.assertLogs("zte_sms_test_api", "DEBUG") as logs:
+                first = await router.async_update_all()
+            second = await router.async_update_all()
+            for name in router._optional_ubus_retry_at:
+                router._optional_ubus_retry_at[name] = 0
+            recovered = await router.async_update_all()
+
+        output = "\n".join(logs.output)
+        self.assertIn("uci.get(config=wireless, section=main_2g) [ubus_status=4]", output)
+        self.assertIn("uci.get(config=wireless, section=main_5g) [code=-32002]", output)
+        self.assertIn("zwrt_led.get_ODU_switch_state [code=-32601]", output)
+        self.assertEqual(len(core_calls[0]) - len(core_calls[1]), 2)
+        self.assertEqual(core_calls[0], core_calls[2])
+        self.assertEqual(first["wifi_main_2g"], {})
+        self.assertEqual(second["wifi_main_2g"], {})
+        self.assertEqual(second["odu_led"], {})
+        self.assertEqual(second["common_config"]["hardware_version"], "G5TSHW_1.0.0")
+        self.assertEqual(second["wan"]["current_wan_status"], "ipv4_connected")
+        self.assertEqual(recovered["wifi_main_2g"], {"disabled": "0"})
+
+    async def test_required_failures_stay_warnings_and_do_not_back_off(self):
+        router = api()
+        calls = [{"service": "zte_nwinfo_api", "method": "nwinfo_get_netinfo"}]
+        router.async_call_ubus_batch = AsyncMock(
+            return_value=[{"success": False, "data": None, "error": {"code": -32601}}]
+        )
+        with self.assertLogs("zte_sms_test_api", "WARNING") as logs:
+            for _ in range(2):
+                await router._async_read_poll_batch("core", calls)
+        self.assertEqual(router.async_call_ubus_batch.await_count, 2)
+        self.assertIn("zte_nwinfo_api.nwinfo_get_netinfo [code=-32601]", logs.output[0])
+
+    async def test_only_optional_acl_failure_does_not_refresh_a_working_session(self):
+        for required_reply, should_retry in (
+            ({"result": [0, {"status": "online"}]}, False),
+            ({"error": {"code": -32002}}, True),
+            ({"result": [7]}, True),
+        ):
+            with self.subTest(required_reply=required_reply):
+                router = api()
+
+                async def login(**_):
+                    router._logged_in = True
+                    router._session_id = "new-test-session"
+
+                router._async_ensure_logged_in = AsyncMock(side_effect=login)
+                calls = [
+                    {"service": "uci", "method": "get", "optional": True},
+                    {"service": "zwrt_router.api", "method": "router_get_status"},
+                ]
+                sent = []
+
+                def post(_url, *, data, **_):
+                    optional, required = json.loads(data)
+                    sent.append((optional, required))
+                    response = [
+                        {"id": optional["id"], "error": {"code": -32002}},
+                        {"id": required["id"], **required_reply},
+                    ]
+                    if len(sent) == 2:
+                        response = [
+                            {"id": optional["id"], "result": [4]},
+                            {"id": required["id"], "result": [0, {"status": "online"}]},
+                        ]
+                    http_response = types.SimpleNamespace(
+                        raise_for_status=lambda: None, text=AsyncMock(return_value=json.dumps(response)),
+                    )
+                    context = AsyncMock()
+                    context.__aenter__.return_value = http_response
+                    return context
+
+                router._session = types.SimpleNamespace(post=post)
+                optional, required = await router.async_call_ubus_batch(calls, batch_name="core")
+                self.assertTrue(required["success"])
+                self.assertFalse(optional["success"])
+                self.assertEqual(len(sent), 2 if should_retry else 1)
+                if should_retry:
+                    router._async_ensure_logged_in.assert_awaited_once_with(force=True)
+                    self.assertEqual(optional["error"]["ubus_status"], 4)
+                else:
+                    router._async_ensure_logged_in.assert_not_awaited()
+                    self.assertEqual(optional["error"]["code"], -32002)
 
 
 class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):

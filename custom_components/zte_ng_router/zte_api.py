@@ -27,6 +27,7 @@ class ZteRouterApi:
     _GOFORM_STATIC_FIELDS = frozenset({"hardware_version", "wa_inner_version"})
     _WIFI_CLIENT_PAGE_SIZE = 64
     _MAX_WIFI_CLIENTS = 2048
+    _OPTIONAL_UBUS_RETRY_SECONDS = 3600
     _GSM7_TABLE_HEX = {
         "000A", "000C", "000D", "0020", "0021", "0022", "0023", "0024", "0025",
         "0026", "0027", "0028", "0029", "002A", "002B", "002C", "002D", "002E",
@@ -67,6 +68,7 @@ class ZteRouterApi:
         self._sms_encryption: str | None = None
         self.track_clients = track_clients
         self._client_snapshot_ok: bool | None = None
+        self._optional_ubus_retry_at: dict[str, float] = {}
 
         self._owns_session = session is None
         if session is not None:
@@ -1373,17 +1375,21 @@ class ZteRouterApi:
                         len(raw_text),
                     )
                 res_list = json.loads(raw_text)
-                # If the session expired, the router may return -32002 for batch items.
+                # An optional ACL can reject a call even with a valid session.
                 if retry_on_access_denied and isinstance(res_list, list):
-                    any_denied = False
+                    denied = required_ok = required_denied = False
                     for it in res_list:
-                        if isinstance(it, dict) and "error" in it:
-                            err = it.get("error") or {}
-                            if err.get("code") == -32002:
-                                any_denied = True
-                                break
+                        if not isinstance(it, dict) or (idx := id_to_index.get(it.get("id"))) is None:
+                            continue
+                        err = it.get("error")
+                        is_denied = isinstance(err, dict) and err.get("code") == -32002
+                        denied |= is_denied
+                        if not calls[idx].get("optional"):
+                            required_denied |= is_denied
+                            result = it.get("result")
+                            required_ok |= "error" not in it and isinstance(result, list) and result[:1] == [0]
 
-                    if any_denied:
+                    if required_denied or (denied and not required_ok):
                         _LOGGER.debug("ubus batch access denied (-32002) detected; re-login and retry once")
                         self._mark_session_stale()
                         await self._async_ensure_logged_in(force=True)
@@ -1454,9 +1460,22 @@ class ZteRouterApi:
                 data = result[1] if len(result) > 1 else None
                 out[idx] = {"success": True, "data": data, "error": None}
             else:
-                out[idx] = {"success": False, "data": None, "error": {"message": "nonzero_result"}}
+                error = {"message": "nonzero_result"}
+                if isinstance(result, list) and result and type(result[0]) is int:
+                    error["ubus_status"] = result[0]
+                out[idx] = {"success": False, "data": None, "error": error}
 
         return out
+
+    @staticmethod
+    def _batch_call_name(call: dict[str, Any]) -> str:
+        name = f"{call['service']}.{call['method']}"
+        if name == "uci.get":
+            params = call.get("params") or {}
+            scope = ", ".join(f"{key}={params[key]}" for key in ("config", "section") if key in params)
+            if scope:
+                name = f"{name}({scope})"
+        return name
 
     @staticmethod
     def _log_batch_failures(
@@ -1465,18 +1484,66 @@ class ZteRouterApi:
         results: list[dict[str, Any]],
     ) -> None:
         """Log failed calls in a named batch without aborting the whole update."""
-        failed: list[str] = []
+        required: list[str] = []
+        optional: list[str] = []
         for call, result in zip(calls, results, strict=False):
             if result.get("success"):
                 continue
-            failed.append(f"{call.get('service')}.{call.get('method')}")
+            name = ZteRouterApi._batch_call_name(call)
+            error = result.get("error")
+            if isinstance(error, dict):
+                for key in ("code", "ubus_status"):
+                    if type(code := error.get(key)) is int:
+                        name += f" [{key}={code}]"
+            (optional if call.get("optional") else required).append(name)
 
-        if failed:
+        if required:
             _LOGGER.warning(
                 "ubus batch '%s' had failed calls: %s",
                 batch_name,
-                ", ".join(failed),
+                ", ".join(required),
             )
+        if optional:
+            _LOGGER.debug(
+                "ubus batch '%s' had failed optional calls: %s",
+                batch_name,
+                ", ".join(optional),
+            )
+
+    async def _async_read_poll_batch(
+        self, batch_name: str, calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Back off unsupported optional reads while preserving response positions."""
+        now = time.monotonic()
+        active = []
+        slots = []
+        results = [{"success": False, "data": None, "error": None} for _ in calls]
+        for idx, call in enumerate(calls):
+            if call.get("optional") and self._optional_ubus_retry_at.get(self._batch_call_name(call), 0) > now:
+                continue
+            active.append(call)
+            slots.append(idx)
+        if not active:
+            return results
+
+        responses = await self.async_call_ubus_batch(active, batch_name=batch_name)
+        self._log_batch_failures(batch_name, active, responses)
+        for idx, call, response in zip(slots, active, responses, strict=True):
+            results[idx] = response
+            if not call.get("optional"):
+                continue
+            name = self._batch_call_name(call)
+            error = response.get("error")
+            # Only explicit method/object/not-supported statuses imply a capability
+            # issue. Authorization, timeouts and incomplete replies remain retryable.
+            if not response.get("success") and isinstance(error, dict) and (
+                error.get("code") in (-32601, -32000)
+                or error.get("ubus_status") in (3, 4, 8)
+            ):
+                self._optional_ubus_retry_at[name] = now + self._OPTIONAL_UBUS_RETRY_SECONDS
+            else:
+                self._optional_ubus_retry_at.pop(name, None)
+        return results
     
     def invalidate_session(self) -> None:
         """Mark the current session as invalid to force a re-login on the next request.
@@ -1886,16 +1953,28 @@ class ZteRouterApi:
         core_batch_calls = [
             {"service": "zte_nwinfo_api", "method": "nwinfo_get_netinfo"},
             {"service": "zwrt_wlan", "method": "report"},
-            {"service": "uci", "method": "get", "params": {"config": "wireless", "section": "zte_mbb"}},
+            {
+                "service": "uci", "method": "get", "optional": True,
+                "params": {"config": "wireless", "section": "zte_mbb"},
+            },
             {"service": "zwrt_bsp.thermal", "method": "get_cpu_temp"},
             {"service": "zwrt_mc.device.manager", "method": "get_device_info"},
             {"service": "zwrt_zte_mdm.api", "method": "get_sim_info"},
             {"service": "zwrt_router.api", "method": "router_get_status"},
             {"service": "zwrt_router.api", "method": "router_get_user_list_num"},
-            {"service": "uci", "method": "get", "params": {"config": "zwrt_common_info", "section": "common_config"}},
-            {"service": "zwrt_led", "method": "get_ODU_switch_state", "params": {}},
-            {"service": "uci", "method": "get", "params": {"config": "wireless", "section": "main_2g"}},
-            {"service": "uci", "method": "get", "params": {"config": "wireless", "section": "main_5g"}},
+            {
+                "service": "uci", "method": "get", "optional": True,
+                "params": {"config": "zwrt_common_info", "section": "common_config"},
+            },
+            {"service": "zwrt_led", "method": "get_ODU_switch_state", "optional": True, "params": {}},
+            {
+                "service": "uci", "method": "get", "optional": True,
+                "params": {"config": "wireless", "section": "main_2g"},
+            },
+            {
+                "service": "uci", "method": "get", "optional": True,
+                "params": {"config": "wireless", "section": "main_5g"},
+            },
             {
                 "service": "zwrt_data",
                 "method": "get_wwandst",
@@ -1939,7 +2018,7 @@ class ZteRouterApi:
             },
         ]
 
-        core_results = await self.async_call_ubus_batch(core_batch_calls, batch_name="core")
+        core_results = await self._async_read_poll_batch("core", core_batch_calls)
         monthly_results = await self.async_call_ubus_batch(monthly_batch_calls, batch_name="monthly")
         metadata_results = await self.async_call_ubus_batch(
             [
@@ -1971,7 +2050,6 @@ class ZteRouterApi:
             log_raw_response=False,
         )
 
-        self._log_batch_failures("core", core_batch_calls, core_results)
         self._log_batch_failures("monthly", monthly_batch_calls, monthly_results)
         self._log_batch_failures("sms", sms_batch_calls, sms_results)
 
