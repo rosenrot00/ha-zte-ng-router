@@ -101,7 +101,6 @@ class TrackerApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["params"] for c in call.args[0][:-1]],
                          [{"start_id": 1, "end_id": 64}, {"start_id": 65, "end_id": 128}])
         self.assertEqual(call.args[0][-1]["method"], "router_get_user_list_num")
-        self.assertFalse(call.kwargs["log_raw_response"])
         self.assertFalse(call.kwargs["retry_on_access_denied"])
         self.assertEqual(call.kwargs["z_mode_override"], "0")
 
@@ -236,7 +235,8 @@ class TrackerApiTests(unittest.IsolatedAsyncioTestCase):
         router._async_read_network_clients_locked = AsyncMock(return_value=snapshot())
 
         async def batch(calls, **kwargs):
-            return [{"success": True, "data": {}} for _ in calls]
+            return [{"success": True, "data": {"current_wan_status": "ipv4_connected"}
+                     if call["method"] == "router_get_status" else {}} for call in calls]
 
         router.async_call_ubus_batch = AsyncMock(side_effect=batch)
         self.assertIsNone((await router.async_update_all())["network_clients"])

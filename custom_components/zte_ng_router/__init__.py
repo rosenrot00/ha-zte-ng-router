@@ -135,6 +135,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except ZteAuthError as err:
             _stop_polling_for_reauth(hass, entry)
             raise ConfigEntryAuthFailed(str(err)) from err
+        except UpdateFailed:
+            raise
         except Exception as err:
             _LOGGER.error("Error updating ZTE router data: %s", err)
             raise UpdateFailed(str(err)) from err
@@ -153,6 +155,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except ZteAuthError as err:
             _stop_polling_for_reauth(hass, entry)
             raise ConfigEntryAuthFailed(str(err)) from err
+        except UpdateFailed:
+            raise
         except Exception as err:
             _LOGGER.error("Error updating ZTE router fast data: %s", err)
             raise UpdateFailed(str(err)) from err

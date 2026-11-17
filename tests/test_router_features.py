@@ -154,6 +154,41 @@ class FeatureSensorTests(unittest.TestCase):
 
 
 class PollingGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_polls_fail_when_there_are_no_usable_replies(self):
+        for reply in (
+            {"success": False, "data": {"ignored": "false success"}},
+            {"success": True, "data": None},
+            {"success": True, "data": {}},
+        ):
+            with self.subTest(reply=reply):
+                router = api()
+                router.async_call_ubus_batch = AsyncMock(
+                    side_effect=lambda calls, **_: [reply for _ in calls],
+                )
+                with patch("logging.Logger.warning"):
+                    self.assertIsNone(await router.async_update_fast())
+                    self.assertIsNone(await router.async_update_all())
+
+    async def test_polls_keep_successful_fields_even_if_other_reads_fail(self):
+        router = api()
+        wan = {"current_wan_status": "ipv4_connected"}
+        async def batch(calls, *, batch_name=None, **_):
+            return [
+                {"success": True, "data": wan}
+                if call["method"] == "router_get_status" and batch_name is None else
+                {"success": True, "data": {"messages": []}}
+                if call["method"] == "zte_libwms_get_sms_data" else
+                {"success": False, "data": {"cpuinfo": "ignore this failed payload"}}
+                for call in calls
+            ]
+        router.async_call_ubus_batch = AsyncMock(side_effect=batch)
+        self.assertEqual(await router.async_update_fast(), {"wan": wan, "wwandst": {}, "device": {}})
+        with self.assertLogs("zte_sms_test_api", "WARNING"):
+            slow = await router.async_update_all()
+        self.assertTrue(slow["sms"]["inbox_available"])
+        self.assertEqual(slow["wan"], {})
+        self.assertIsNone(slow["device"])
+
     async def test_entities_use_the_intended_polling_group(self):
         fast_keys = {"connected_time", "download_rate", "upload_rate", "cpu_usage", "ram_usage",
                      "daily_download", "daily_upload", "rx_packet_errors", "tx_packet_errors",
@@ -191,6 +226,83 @@ class PollingGroupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OptionalCorePollTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_debug_output_does_not_dump_request_or_reply(self):
+        router = api()
+        router._session_id = "sid-secret"
+        secret_payload = {"values": {"key": "wifi-secret", "disabled": "0"}}
+
+        def post(_url, *, data, **_):
+            request, = json.loads(data)
+            self.assertIn("request-secret", data)
+            response = [{"id": request["id"], "result": [0, secret_payload]}]
+            http_response = types.SimpleNamespace(
+                raise_for_status=lambda: None, text=AsyncMock(return_value=json.dumps(response)),
+            )
+            context = AsyncMock()
+            context.__aenter__.return_value = http_response
+            return context
+
+        router._session = types.SimpleNamespace(post=post)
+        with self.assertLogs("zte_sms_test_api", "DEBUG") as logs:
+            results = await router.async_call_ubus_batch(
+                [{"service": "uci", "method": "get", "params": {"password": "request-secret"}}],
+                batch_name="core",
+            )
+        self.assertEqual(results[0]["data"], secret_payload)
+        self.assertIn("successful=1/1", "\n".join(logs.output))
+        self.assertNotIn("secret", "\n".join(logs.output))
+
+    async def test_wifi_report_is_optional_and_missing_hardware_is_not_reported_as_off(self):
+        for alternatives in (None, {"wifi_onoff": "0"}):
+            with self.subTest(alternatives=alternatives):
+                router = api("g51f")
+                core_methods = []
+                report_error = {"code": -32000}
+
+                async def batch(calls, *, batch_name, **_):
+                    if batch_name == "core":
+                        core_methods.append([call["method"] for call in calls])
+                    responses = []
+                    for call in calls:
+                        method = call["method"]
+                        section = call.get("params", {}).get("section")
+                        error = None
+                        payload = None
+                        if method == "report":
+                            error = report_error
+                            if error is None:
+                                payload = {"wifi_onoff": "0"}
+                        elif section == "zte_mbb" and alternatives is not None:
+                            payload = {"values": alternatives}
+                        elif method == "router_get_user_list_num":
+                            payload = {"wireless_num": "0", "lan_num": "1"}
+                        elif method == "router_get_status":
+                            payload = {"current_wan_status": "ipv4_connected"}
+                        responses.append({"success": error is None, "error": error, "data": payload})
+                    return responses
+
+                router.async_call_ubus_batch = AsyncMock(side_effect=batch)
+                with self.assertNoLogs("zte_sms_test_api", "WARNING"):
+                    with self.assertLogs("zte_sms_test_api", "DEBUG") as logs:
+                        first = await router.async_update_all()
+                    second = await router.async_update_all()
+                    router._optional_ubus_retry_at["zwrt_wlan.report"] = 0
+                    report_error = None
+                    recovered = await router.async_update_all()
+                    report_error = {"code": -32003}
+                    timeout = await router.async_update_all()
+
+                self.assertIn("zwrt_wlan.report [code=-32000]", "\n".join(logs.output))
+                self.assertIn("report", core_methods[0])
+                self.assertNotIn("report", core_methods[1])
+                self.assertIn("report", core_methods[2])
+                self.assertEqual(first["wifi_available"], alternatives is not None)
+                self.assertEqual(second["wifi_available"], alternatives is not None)
+                self.assertTrue(recovered["wifi_available"])
+                self.assertTrue(timeout["wifi_available"])
+                self.assertEqual(second["wan"]["current_wan_status"], "ipv4_connected")
+                self.assertEqual(sensors._extract_value(second, "connected_lan_devices"), 1)
+
     async def test_unsupported_reads_back_off_without_shifting_other_results(self):
         router = api()
         core_calls = []
@@ -409,7 +521,7 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await router.async_check_firmware_update())
             self.assertEqual(router.async_call_ubus.await_count, 1)
 
-    async def test_poll_adds_only_read_methods_and_does_not_log_coordinates(self):
+    async def test_poll_adds_only_firmware_and_gnss_read_methods(self):
         router = self.router()
 
         async def batch(calls, **kwargs):
@@ -425,7 +537,6 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["gnss"]["LAT"], "12.34")
         metadata = next(c for c in router.async_call_ubus_batch.call_args_list
                         if c.kwargs.get("batch_name") == "firmware_gnss")
-        self.assertFalse(metadata.kwargs["log_raw_response"])
         self.assertFalse(metadata.kwargs["retry_on_access_denied"])
         self.assertEqual(metadata.kwargs["z_mode_override"], "0")
         self.assertEqual([c["method"] for c in metadata.args[0]], ["get_update_info", "get"])
@@ -435,8 +546,10 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
         router = self.router()
 
         async def batch(calls, **kwargs):
-            return [{"success": kwargs.get("batch_name") != "firmware_gnss", "data": {}}
-                    for _ in calls]
+            return [{"success": kwargs.get("batch_name") != "firmware_gnss",
+                     "data": {"current_wan_status": "ipv4_connected"}
+                     if call["method"] == "router_get_status" else {}}
+                    for call in calls]
 
         router.async_call_ubus_batch = AsyncMock(side_effect=batch)
         data = await router.async_update_all()
@@ -449,8 +562,9 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
             router = self.router()
 
             async def batch(calls, **kwargs):
-                return [{"success": True, "data": payload if kwargs.get("batch_name") == "firmware_gnss" else {}}
-                        for _ in calls]
+                return [{"success": True, "data": payload if kwargs.get("batch_name") == "firmware_gnss" else
+                         {"current_wan_status": "ipv4_connected"} if call["method"] == "router_get_status" else {}}
+                        for call in calls]
 
             router.async_call_ubus_batch = AsyncMock(side_effect=batch)
             data = await router.async_update_all()

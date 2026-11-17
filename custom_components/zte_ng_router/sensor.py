@@ -28,6 +28,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME, CONF_SMS_LEGACY_PREVIEW
+from .wifi import wifi_flag, wifi_master_state
+
+
+WIFI_SENSOR_KEYS = frozenset({"wifi_onoff", "main2g_ssid", "main5g_ssid", "radio_off", "connected_wifi_devices"})
 
 
 # key, name, device_class, unit, state_class
@@ -523,7 +527,6 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
     """Map a logical key to a value inside the aggregated API data."""
     netinfo = data.get("netinfo") or {}
     wlan = data.get("wlan") or {}
-    wifi_module = data.get("wifi_module") or {}
     thermal = data.get("thermal") or {}
     device = data.get("device") or {}
     sim_info = data.get("sim_info") or {}
@@ -548,11 +551,7 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
 
     # Wi-Fi master switch follows the WebUI source: UCI wireless.zte_mbb.
     if key == "wifi_onoff":
-        v = wifi_module.get("wifi_onoff", wlan.get("wifi_onoff"))
-        if v is None:
-            return None
-        # Router returns "0"/"1" strings
-        return str(v) == "1"
+        return wifi_master_state(data)
 
     if key == "main2g_ssid":
         return wlan.get("main2g_ssid")
@@ -687,21 +686,19 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         # Newer UBUS firmwares expose radio state through zwrt_wlan.report,
         # not the older GoForm RadioOff field. Treat Wi-Fi off as radio off;
         # otherwise use per-band disabled flags when present.
-        radio_off = wlan.get("RadioOff")
+        radio_off = wifi_flag(wlan.get("RadioOff"))
         if radio_off is not None:
-            return str(radio_off) == "1"
+            return radio_off
 
-        wifi_onoff = wifi_module.get("wifi_onoff", wlan.get("wifi_onoff"))
-        if wifi_onoff is not None and str(wifi_onoff) == "0":
+        wifi_onoff = wifi_master_state(data)
+        if wifi_onoff is False:
             return True
 
-        radio2_disabled = wlan.get("radio2_disabled")
-        radio5_disabled = wlan.get("radio5_disabled")
-        if radio2_disabled is not None or radio5_disabled is not None:
-            return str(radio2_disabled) == "1" and str(radio5_disabled) == "1"
-
-        if wifi_onoff is not None:
-            return False if str(wifi_onoff) == "1" else None
+        radio_states = (wifi_flag(wlan.get("radio2_disabled")), wifi_flag(wlan.get("radio5_disabled")))
+        if radio_states == (True, True):
+            return True
+        if False in radio_states or wifi_onoff is True:
+            return False
         return None
 
     if key == "hightemp_datalimit_status":
@@ -998,6 +995,12 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         self._attr_entity_registry_enabled_default = _sensor_enabled_by_default(
             coordinator.data or {}, key
         )
+
+    @property
+    def available(self) -> bool:
+        if self._key in WIFI_SENSOR_KEYS and (self.coordinator.data or {}).get("wifi_available") is False:
+            return False
+        return super().available
 
     @property
     def native_value(self) -> Any:

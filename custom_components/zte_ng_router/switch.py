@@ -17,9 +17,19 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.event import async_call_later
 
 from .const import DOMAIN
+from .wifi import wifi_flag, wifi_master_state
 from .zte_api import ZteRouterApi
 
 _LOGGER = logging.getLogger(__name__)
+
+WIFI_SWITCH_KEYS = frozenset({"wifi_master", "wifi_main_2g", "wifi_main_5g"})
+SAFE_SWITCH_FLAGS = {
+    "odu_led": ("switch",),
+    "wifi_master": ("wifi_onoff", "lbd", "mlo"),
+    "wifi_main_2g": ("disabled",),
+    "wifi_main_5g": ("disabled",),
+    "mobile_data": ("enable", "roam_enable", "connect_mode"),
+}
 
 
 @dataclass(frozen=True)
@@ -192,7 +202,13 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
         )
 
     @property
-    def is_on(self) -> bool:
+    def available(self) -> bool:
+        if self._def.key in WIFI_SWITCH_KEYS and (self.coordinator.data or {}).get("wifi_available") is False:
+            return False
+        return super().available
+
+    @property
+    def is_on(self) -> bool | None:
         data = self.coordinator.data or {}
 
         # The primary WAN can be Ethernet; prefer the cellular connection status.
@@ -207,11 +223,17 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
             )
             return status in {"ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"}
 
-        # If WiFi master is OFF, force band switches to show OFF
+        if self._def.key == "wifi_master":
+            return wifi_master_state(data)
+
         if self._def.key in ("wifi_main_2g", "wifi_main_5g"):
-            wifi_onoff = ((data.get("wifi_module") or data.get("wlan")) or {}).get("wifi_onoff")
-            if str(wifi_onoff) != "1":
+            master = wifi_master_state(data)
+            disabled = wifi_flag((self._def.get_path(data) or {}).get("disabled"))
+            if master is False or disabled is True:
                 return False
+            if master is True and disabled is False:
+                return True
+            return None
 
         node = self._def.get_path(data) or {}
         value = node.get(self._def.state_key)
@@ -220,7 +242,16 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         data = self.coordinator.data or {}
-        return self._def.get_path(data)
+        node = self._def.get_path(data) or {}
+        attrs = {key: node[key] for key in SAFE_SWITCH_FLAGS.get(self._def.key, ())
+                 if wifi_flag(node.get(key)) is not None}
+        if self._def.key == "wifi_master" and (state := wifi_master_state(data)) is not None:
+            attrs.setdefault("wifi_onoff", str(int(state)))
+        if self._def.key == "odu_led":
+            offtime = node.get("offtime")
+            if type(offtime) in (str, int) and str(offtime).isascii() and str(offtime).isdecimal():
+                attrs["offtime"] = offtime
+        return attrs or None
 
 
     async def async_turn_on(self, **kwargs: Any) -> None:

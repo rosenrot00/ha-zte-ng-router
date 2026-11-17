@@ -18,6 +18,10 @@ def load_sensors():
         def __init__(self, coordinator):
             self.coordinator = coordinator
 
+        @property
+        def available(self):
+            return self.coordinator.last_update_success
+
     symbols = {
         "homeassistant.components.sensor": {
             "SensorEntity": type("SensorEntity", (), {}),
@@ -64,6 +68,23 @@ OPTIONAL_KEYS = {"5g_modem_temperature", "modem_temperature", "pa_temp_level", "
 
 
 class SensorDefaultTests(unittest.TestCase):
+    def test_only_wifi_sensors_become_unavailable_and_keep_their_ids(self):
+        coordinator = types.SimpleNamespace(data={"wifi_available": False}, last_update_success=True)
+        wifi_keys = {"wifi_onoff", "main2g_ssid", "main5g_ssid", "radio_off", "connected_wifi_devices"}
+        for key, name, device_class, unit, state_class in sensors.SENSOR_DEFS:
+            with self.subTest(key=key):
+                entity = sensors.ZteNgRouterSensor(
+                    coordinator, "entry", "Router", key, name, device_class, unit, state_class,
+                )
+                self.assertEqual(entity._attr_unique_id, f"entry_{key}")
+                self.assertEqual(entity.available, key not in wifi_keys)
+                coordinator.data = {}
+                self.assertTrue(entity.available)
+                coordinator.last_update_success = False
+                self.assertFalse(entity.available)
+                coordinator.last_update_success = True
+                coordinator.data = {"wifi_available": False}
+
     def test_g5tc_identification_from_polled_metadata(self):
         for section, field, identity in (
             ("common_config", "model_name", "G5TC"),

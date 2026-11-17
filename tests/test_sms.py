@@ -278,7 +278,6 @@ class SmsSendTests(unittest.IsolatedAsyncioTestCase):
         sms_batch = router.async_call_ubus_batch.call_args_list[-1]
         self.assertEqual(len(sms_batch.args[0]), 2)
         self.assertEqual(sms_batch.kwargs["z_mode_override"], "0")
-        self.assertFalse(sms_batch.kwargs["log_raw_response"])
 
     async def test_inbox_snapshot_distinguishes_failure_from_confirmed_empty(self):
         for reply, available in (
@@ -291,7 +290,9 @@ class SmsSendTests(unittest.IsolatedAsyncioTestCase):
 
                 async def batch(calls, **kwargs):
                     return [
-                        reply if call["method"] == "zte_libwms_get_sms_data" else {"success": True, "data": {}}
+                        reply if call["method"] == "zte_libwms_get_sms_data" else
+                        {"success": True, "data": {"current_wan_status": "ipv4_connected"}
+                         if call["method"] == "router_get_status" else {}}
                         for call in calls
                     ]
 
