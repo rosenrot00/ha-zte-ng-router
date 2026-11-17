@@ -25,6 +25,7 @@ from .const import (
     DEFAULT_FAST_SCAN_INTERVAL,
     CONF_TRACK_CLIENTS,
 )
+from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms
 from .zte_api import ZteRouterApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,31 @@ PLATFORMS: list[str] = ["sensor", "button", "switch", "text", "device_tracker"]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up integration from YAML (not used, config flow only)."""
     return True
+
+
+def _fire_sms_events(
+    hass: HomeAssistant, entry: ConfigEntry, name: str, data: dict[str, Any]
+) -> None:
+    """Fire one event per newly received SMS (never exposed via entity state)."""
+    store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if store is None:
+        return
+    messages = (data.get("sms") or {}).get("messages")
+    new_messages, store["sms_seen"] = collect_new_incoming_sms(
+        messages, store.get("sms_seen")
+    )
+    for message in new_messages:
+        hass.bus.async_fire(
+            EVENT_SMS_RECEIVED,
+            {
+                "entry_id": entry.entry_id,
+                "name": name,
+                "id": message.get("id"),
+                "number": message.get("number"),
+                "date": message.get("date"),
+                "text": message.get("content_decoded"),
+            },
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -88,6 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = await api.async_update_all()
             if data is None:
                 raise UpdateFailed("No data returned from router")
+            _fire_sms_events(hass, entry, name, data)
             return data
         except Exception as err:
             _LOGGER.error("Error updating ZTE router data: %s", err)

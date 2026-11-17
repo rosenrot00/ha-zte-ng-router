@@ -41,7 +41,8 @@ Feature availability depends on router model and firmware.
 - Manual firmware check and a separate update-start button
 - GNSS latitude/longitude with fix status, source and the router's original fix time
 - Optional WLAN/LAN client trackers with MAC/IP/hostname and presence history
-- SMS inbox readout (count, unread, storage capacity + latest message preview)  
+- SMS inbox readout (count, unread, storage capacity + timestamp of the latest message)  
+- `zte_ng_router_sms_received` event for every newly received SMS (see [Received SMS](#received-sms))  
 - SMS compose + send (via Home Assistant text field and button)  
 - Device information (model, firmware, IMEI/ICCID where available)  
 - Downloadable diagnostics (redacted config, login method, polling status, firmware identity; no router payloads)  
@@ -143,6 +144,29 @@ not a timestamp.
 ## Requirements
 
 - Local network connectivity between Home Assistant and the router IP
+
+## Received SMS
+
+Sender numbers and message texts are intentionally **not** part of any entity state
+or attribute: both are stored by the recorder and readable by every Home Assistant
+user. The `Latest SMS` sensor only exposes the timestamp of the newest message plus
+counts and storage capacity.
+
+Every newly received SMS is announced once as a `zte_ng_router_sms_received` event
+instead. Use it as an automation trigger:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: zte_ng_router_sms_received
+actions:
+  - action: notify.notify
+    data:
+      message: "SMS from {{ trigger.event.data.number }}: {{ trigger.event.data.text }}"
+```
+
+Event data: `entry_id`, `name`, `id`, `number`, `date`, `text`. Messages already in
+the inbox when Home Assistant starts are not replayed.
 
 ## SMS encryption
 
