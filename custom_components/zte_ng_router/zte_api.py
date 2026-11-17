@@ -21,6 +21,14 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 
+class ZteAuthError(RuntimeError):
+    """Raised when the router rejects the supplied password.
+
+    Distinct from connection/protocol errors so the coordinator can start the
+    reauth flow and the config flow can report ``invalid_auth``.
+    """
+
+
 class ZteRouterApi:
     """Async low-level API wrapper for ZTE 5G routers (e.g. G5TC)."""
     _GOFORM_MAX_CONCURRENCY = 8
@@ -513,6 +521,10 @@ class ZteRouterApi:
             await self._async_ubus_login()
             self._api_mode = "ubus"
             return
+        except ZteAuthError:
+            # The UBUS protocol is supported and rejected the password; GoForm
+            # would only repeat the failed attempt.
+            raise
         except Exception as exc:
             ubus_exc = exc
             _LOGGER.info("UBUS login failed (%s), trying GoForm fallback", exc)
@@ -520,6 +532,8 @@ class ZteRouterApi:
         try:
             await self._async_goform_login()
             return
+        except ZteAuthError:
+            raise
         except Exception as goform_exc:
             if ubus_exc is None:
                 raise RuntimeError(f"GoForm login failed: {goform_exc}") from goform_exc
@@ -565,7 +579,9 @@ class ZteRouterApi:
         d = login_res.get("data") or {}
         sid = d.get("ubus_rpc_session")
         if not sid:
-            raise RuntimeError(f"Login failed, response: {d}")
+            # The salt request succeeded, so UBUS login is supported: the router
+            # refused the credentials. Do not echo the response.
+            raise ZteAuthError("UBUS web_login was rejected by the router")
 
         self._session_id = sid
         self._logged_in = True
@@ -755,7 +771,7 @@ class ZteRouterApi:
         })
         result = login_resp.get("result", "")
         if result != "0":
-            raise RuntimeError(f"GoForm login failed: result={result!r}")
+            raise ZteAuthError(f"GoForm login was rejected by the router (result={result!r})")
         self._logged_in = True
         self._api_mode = "goform"
         _LOGGER.info("ZTE GoForm login successful")

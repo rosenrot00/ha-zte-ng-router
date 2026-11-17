@@ -139,6 +139,14 @@ limit (as defined by the WebUI service) and `router_native` for a volume limit;
 the volume unit has not been verified. The reset day is a monthly day number,
 not a timestamp.
 
+## Authentication
+
+The router login is verified when you add the integration, so a wrong password or
+an unreachable router is reported right away instead of creating a broken entry. If
+the password stops working later (for example after it was changed on the router),
+Home Assistant starts its **reauthentication** flow and asks for the new password;
+polling is paused meanwhile so the router does not see a stream of failed logins.
+
 ## Requirements
 
 - Local network connectivity between Home Assistant and the router IP

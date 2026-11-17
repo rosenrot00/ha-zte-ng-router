@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components/zte_ng_router"
 
 def load_flow():
     class Flow:
+        hass = None
+
         def __init_subclass__(cls, **kwargs):
             pass
 
@@ -40,14 +42,35 @@ def load_flow():
     const.CONF_HOST = "host"
     const.CONF_PASSWORD = "password"
     core = types.ModuleType("homeassistant.core")
+    core.HomeAssistant = object
     core.callback = lambda f: f
+
+    class ZteAuthError(RuntimeError):
+        pass
+
+    class ZteRouterApi:
+        """The config flow now verifies the login; these tests assume it succeeds."""
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def async_login(self):
+            pass
+
+        async def async_close(self):
+            pass
+
+    zte_api = types.ModuleType("zte_config_test.zte_api")
+    zte_api.ZteAuthError = ZteAuthError
+    zte_api.ZteRouterApi = ZteRouterApi
     package = types.ModuleType("zte_config_test")
     package.__path__ = [str(ROOT)]
     spec = importlib.util.spec_from_file_location("zte_config_test.config_flow", ROOT / "config_flow.py")
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, {"homeassistant": ha, "homeassistant.config_entries": entries,
                                  "homeassistant.const": const, "homeassistant.core": core,
-                                 "zte_config_test": package, spec.name: module}):
+                                 "zte_config_test": package,
+                                 "zte_config_test.zte_api": zte_api, spec.name: module}):
         spec.loader.exec_module(module)
     return module
 

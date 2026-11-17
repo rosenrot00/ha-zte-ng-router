@@ -16,10 +16,24 @@
           "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. New trackers are disabled until enabled in the entity settings.",
           "client_consider_home": "Confirmed absence before reporting a client away. Default 180 seconds; errors and polling pauses reset the grace period."
         }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate {name}",
+        "description": "The router rejected the stored password. Enter the current router password.",
+        "data": {
+          "password": "Router password"
+        }
       }
     },
-    "error": {"invalid_scan_interval": "The polling interval must be between 5 and 3600 seconds."},
-    "abort": {"already_configured": "This router is already configured."}
+    "error": {
+      "invalid_scan_interval": "The polling interval must be between 5 and 3600 seconds.",
+      "invalid_auth": "The router rejected the password.",
+      "cannot_connect": "Could not log in to the router. Check the router URL and that it is reachable."
+    },
+    "abort": {
+      "already_configured": "This router is already configured.",
+      "reauth_successful": "Reauthentication was successful."
+    }
   },
   "options": {
     "step": {
