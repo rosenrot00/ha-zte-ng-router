@@ -478,16 +478,6 @@ def _parse_sms_date(raw: Any) -> str | None:
         return txt
 
 
-def _truncate_text(value: Any, max_len: int = 240) -> str | None:
-    """Limit long SMS content so entity state/attributes stay compact."""
-    txt = _as_text(value)
-    if txt is None:
-        return None
-    if len(txt) <= max_len:
-        return txt
-    return f"{txt[:max_len - 3]}..."
-
-
 def _seconds_ago_to_datetime(value: Any) -> datetime | None:
     """Convert a router-reported duration in seconds to an aware UTC datetime."""
     seconds = _as_number(value)
@@ -865,11 +855,9 @@ def _extract_value(data: dict[str, Any], key: str) -> Any:
         latest = sms.get("latest")
         if not isinstance(latest, dict):
             return None
-        number = _as_text(latest.get("number")) or "Unknown"
-        sms_date = _parse_sms_date(latest.get("date")) or _as_text(latest.get("date"))
-        if sms_date:
-            return f"{number} @ {sms_date}"
-        return number
+        # Only the timestamp: the sender's number and the text must not end up in
+        # the state (and thereby the recorder). See the ``sms_received`` event.
+        return _parse_sms_date(latest.get("date")) or _as_text(latest.get("date"))
 
     if key == "connected_time":
         # Represent the current session as the timestamp when the connection started.
@@ -1075,25 +1063,11 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         }
 
         if latest:
+            # No sender number and no message text here: attributes are stored by
+            # the recorder and readable by every user. Incoming messages are
+            # announced through the ``zte_ng_router_sms_received`` event instead.
             attrs["latest_id"] = latest.get("id")
-            attrs["latest_number"] = latest.get("number")
             attrs["latest_tag"] = latest.get("tag")
             attrs["latest_date"] = _parse_sms_date(latest.get("date")) or latest.get("date")
-            attrs["latest_text"] = _truncate_text(latest.get("content_decoded"), 500)
 
-        # Keep only a compact preview in attributes.
-        preview: list[dict[str, Any]] = []
-        for msg in messages[:5]:
-            if not isinstance(msg, dict):
-                continue
-            preview.append(
-                {
-                    "id": msg.get("id"),
-                    "number": msg.get("number"),
-                    "date": _parse_sms_date(msg.get("date")) or msg.get("date"),
-                    "tag": msg.get("tag"),
-                    "text": _truncate_text(msg.get("content_decoded"), 140),
-                }
-            )
-        attrs["recent_messages"] = preview
         return attrs
