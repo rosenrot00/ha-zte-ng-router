@@ -44,6 +44,7 @@ Feature availability depends on router model and firmware.
 - SMS inbox readout (count, unread, storage capacity + latest message preview)  
 - SMS compose + send (via Home Assistant text field and button)  
 - Device information (model, firmware, IMEI/ICCID where available)  
+- Downloadable diagnostics (redacted config, login method, polling status, firmware identity; no router payloads)  
 - Optional controls (e.g. reboot, mobile data on/off)
 
 If a feature is missing, please open an issue to report it.
