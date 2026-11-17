@@ -131,6 +131,16 @@ class ZteRouterApi:
         self._rpc_id += 1
         return rpc_id
 
+    @property
+    def is_logged_in(self) -> bool:
+        """Return whether an authenticated router session is active."""
+        return self._logged_in
+
+    @property
+    def login_method(self) -> str | None:
+        """Return the active protocol (ubus/goform) without exposing session ids."""
+        return self._api_mode if self._logged_in else None
+
     @staticmethod
     def _normalize_pem(text: str) -> str:
         """Normalize compact PEM returned by some ZTE firmwares."""
