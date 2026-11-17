@@ -21,7 +21,11 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 
-class ZteAuthError(RuntimeError):
+class ZteLoginRejected(RuntimeError):
+    """The router answered the login request but refused it."""
+
+
+class ZteAuthError(ZteLoginRejected):
     """Raised when the router rejects the supplied password.
 
     Distinct from connection/protocol errors so the coordinator can start the
@@ -91,6 +95,7 @@ class ZteRouterApi:
 
         self._session_id: Optional[str] = None
         self._logged_in: bool = False
+        self._auth_failed: bool = False
         self._http_encryption_key: Optional[str] = None
 
         self._auth_lock = asyncio.Lock()
@@ -207,6 +212,26 @@ class ZteRouterApi:
 
         if self._owns_session and not self._session.closed:
             await self._session.close()
+
+    async def async_end_validation_session(self) -> None:
+        """Release the temporary login before setup opens its own session."""
+        if not self._logged_in:
+            return
+        try:
+            async with asyncio.timeout(3):
+                if self._api_mode == "goform":
+                    await self._async_goform_set({"isTest": "false", "goformId": "LOGOUT"})
+                elif self._session_id is not None:
+                    await self.async_call_ubus(
+                        {"service": "zwrt_web", "method": "web_logout", "params": {}},
+                        session_id=self._session_id,
+                        retry_on_access_denied=False,
+                        retry_on_connreset_104=False,
+                    )
+        except Exception as exc:
+            _LOGGER.debug("Could not release validation session: %s", type(exc).__name__)
+        finally:
+            self._mark_session_stale()
 
     @staticmethod
     def _decode_sms_content(raw_content: Any) -> str:
@@ -523,7 +548,7 @@ class ZteRouterApi:
         """Perform login.
 
         Try UBUS first for compatibility/performance. If UBUS is unavailable on this
-        firmware (or otherwise fails), always attempt GoForm as fallback.
+        firmware (or the request fails), attempt GoForm as fallback.
         """
         ubus_exc: Exception | None = None
 
@@ -531,18 +556,17 @@ class ZteRouterApi:
             await self._async_ubus_login()
             self._api_mode = "ubus"
             return
-        except ZteAuthError:
-            # The UBUS protocol is supported and rejected the password; GoForm
-            # would only repeat the failed attempt.
+        except ZteLoginRejected:
+            # Don't submit the password again after a definitive protocol reply.
             raise
         except Exception as exc:
             ubus_exc = exc
-            _LOGGER.info("UBUS login failed (%s), trying GoForm fallback", exc)
+            _LOGGER.debug("UBUS login failed (%s), trying GoForm fallback", type(exc).__name__)
 
         try:
             await self._async_goform_login()
             return
-        except ZteAuthError:
+        except ZteLoginRejected:
             raise
         except Exception as goform_exc:
             if ubus_exc is None:
@@ -560,15 +584,19 @@ class ZteRouterApi:
             "method": "web_login_info",
             "params": {},
         }
+        no_session = {
+            "session_id": "0" * 32,
+            "retry_on_access_denied": False,
+            "retry_on_connreset_104": False,
+        }
         salt_res = await self.async_call_ubus(
             salt_req,
-            session_id="0" * 32,
-            retry_on_access_denied=False,
+            **no_session,
         )
 
-        data = salt_res.get("data") or {}
-        salt = data.get("zte_web_sault")
-        if not salt:
+        data = salt_res.get("data")
+        salt = data.get("zte_web_sault") if isinstance(data, dict) else None
+        if not isinstance(salt, str) or not salt:
             raise RuntimeError("Could not retrieve login salt")
 
         # 2) final hash = SHA256(SHA256(password) + salt)
@@ -583,20 +611,39 @@ class ZteRouterApi:
         }
         login_res = await self.async_call_ubus(
             login_req,
-            session_id="0" * 32,
-            retry_on_access_denied=False,
+            **no_session,
         )
-        d = login_res.get("data") or {}
+        d = login_res.get("data")
+        if not login_res.get("success") or not isinstance(d, dict):
+            raise RuntimeError("No usable UBUS web_login response")
         sid = d.get("ubus_rpc_session")
-        if not sid:
-            # The salt request succeeded, so UBUS login is supported: the router
-            # refused the credentials. Do not echo the response.
-            raise ZteAuthError("UBUS web_login was rejected by the router")
+        if not isinstance(sid, str) or not sid:
+            result = d.get("result")
+            if str(result) in {"badPassword", "invalid_password"}:
+                raise ZteAuthError("The router rejected the password")
+            if type(result) in (int, str) and str(result) not in {"", "0"}:
+                # Numeric rejection codes vary. Only a consumed password attempt
+                # confirms the rejection; a lockout or active login need not.
+                count = self._parse_login_attempts(data)
+                if count is not None and count > 0:
+                    current = await self.async_call_ubus(salt_req, **no_session)
+                    if current.get("success") and self._parse_login_attempts(current.get("data")) == count - 1:
+                        raise ZteAuthError("The router rejected the password")
+                raise ZteLoginRejected("The router refused UBUS login")
+            raise RuntimeError("UBUS web_login returned no session")
 
         self._session_id = sid
         self._logged_in = True
         _LOGGER.info("ZTE NG Router UBUS login successful")
         await self._async_setup_http_encryption()
+
+    @staticmethod
+    def _parse_login_attempts(data: Any) -> int | None:
+        if isinstance(data, dict):
+            value = str(data.get("login_fail_num", ""))
+            if value.isascii() and value.isdecimal() and len(value) <= 3:
+                return int(value)
+        return None
 
     async def _async_setup_http_encryption(self) -> None:
         """Mirror WebUI web_http_enstr_set step after login.
@@ -779,9 +826,11 @@ class ZteRouterApi:
             "goformId": "LOGIN",
             "password": final,
         })
-        result = login_resp.get("result", "")
-        if result != "0":
-            raise ZteAuthError(f"GoForm login was rejected by the router (result={result!r})")
+        result = login_resp.get("result") if isinstance(login_resp, dict) else None
+        if str(result) == "1":
+            raise ZteAuthError("The router rejected the password")
+        if str(result) != "0":
+            raise RuntimeError("GoForm login did not return a successful result")
         self._logged_in = True
         self._api_mode = "goform"
         _LOGGER.info("ZTE GoForm login successful")
@@ -1012,12 +1061,10 @@ class ZteRouterApi:
             "sms_nvused_total": str(nv_used),
             "sms_dev_unread_num": str(unread),
         }
-        raw_messages = (sms_msgs_resp.get("messages") or []) if isinstance(sms_msgs_resp, dict) else []
+        raw_messages = sms_msgs_resp.get("messages") if isinstance(sms_msgs_resp, dict) else None
         sms_messages: list[dict[str, Any]] = []
-        for msg in raw_messages:
-            if not isinstance(msg, dict):
-                continue
-            sms_messages.append(self._parse_sms_message(msg))
+        if isinstance(raw_messages, list):
+            sms_messages = [self._parse_sms_message(msg) for msg in raw_messages if isinstance(msg, dict)]
 
         bands_summary, total_bw_mhz = self._compute_bands_and_bw(netinfo)
         return {
@@ -1043,6 +1090,7 @@ class ZteRouterApi:
             "wwaniface": {},
             "wwandst_monthly": wwandst_monthly,
             "sms": {
+                "inbox_available": isinstance(raw_messages, list),
                 "messages": sms_messages,
                 "latest": sms_messages[0] if sms_messages else None,
                 "capacity": sms_cap_mapped,
@@ -1101,6 +1149,8 @@ class ZteRouterApi:
         Uses a lock to prevent concurrent logins and avoids repeated logins within the same update cycle.
         """
         async with self._auth_lock:
+            if self._auth_failed:
+                raise ZteAuthError("The router rejected the password")
             if force:
                 self._mark_session_stale()
 
@@ -1123,7 +1173,11 @@ class ZteRouterApi:
                 self._goform_session = None
 
             await self.async_init_session()
-            await self.async_login()
+            try:
+                await self.async_login()
+            except ZteAuthError:
+                self._auth_failed = True
+                raise
 
     # --------------------------------------------------------------------
     # ubus caller with automatic re-login on -32002
@@ -1427,6 +1481,8 @@ class ZteRouterApi:
                             retry_on_connreset_104=retry_on_connreset_104,
                             retry_on_access_denied=False,
                         )
+        except ZteAuthError:
+            raise
         except Exception as exc:
             exc_name = type(exc).__name__
             _LOGGER.warning(
@@ -1442,6 +1498,8 @@ class ZteRouterApi:
                 self._mark_session_stale()
                 try:
                     await self._async_ensure_logged_in(force=True)
+                except ZteAuthError:
+                    raise
                 except Exception as exc2:
                     _LOGGER.error("Re-login failed after 104 during batch: %s", exc2)
                     return [{"success": False, "data": None, "error": {"message": str(exc2)}} for _ in calls]
@@ -2135,9 +2193,9 @@ class ZteRouterApi:
         wwandst = wwandst_res.get("data") or {}
         wwaniface = wwaniface_res.get("data") or {}
         wwandst_monthly = wwandst_monthly_res.get("data") or {}
-        sms_payload = sms_res.get("data") or {}
+        sms_payload = sms_res.get("data")
         sms_capacity = self._normalize_sms_capacity(sms_capacity_res.get("data"))
-        raw_messages = sms_payload.get("messages") or []
+        raw_messages = sms_payload.get("messages") if sms_res.get("success") and isinstance(sms_payload, dict) else None
         sms_messages: list[dict[str, Any]] = []
         if isinstance(raw_messages, list):
             for msg in raw_messages:
@@ -2172,6 +2230,7 @@ class ZteRouterApi:
             "firmware": firmware,
             "gnss": gnss,
             "sms": {
+                "inbox_available": isinstance(raw_messages, list),
                 "messages": sms_messages,
                 "latest": sms_messages[0] if sms_messages else None,
                 "capacity": sms_capacity,

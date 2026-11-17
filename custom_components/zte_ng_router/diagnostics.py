@@ -4,32 +4,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    CONF_CLIENT_CONSIDER_HOME,
+    CONF_FAST_SCAN_INTERVAL,
+    CONF_SCAN_INTERVAL,
+    CONF_TRACK_CLIENTS,
+    CONF_VERIFY_TLS,
+    DOMAIN,
+)
 
-TO_REDACT = {
-    CONF_PASSWORD,
-    "password",
-    "cookie",
-    "cookies",
-    "token",
-    "access_token",
-    "session",
-    "session_id",
-    "ubus_rpc_session",
-    "webtoken",
-    "csrf",
-    "csrf_token",
-    "salt",
-    "zte_web_sault",
-    "latitude",
-    "longitude",
-    "phone_number",
-    "number",
+SAFE_SETTINGS = {
+    CONF_CLIENT_CONSIDER_HOME: int,
+    CONF_FAST_SCAN_INTERVAL: int,
+    CONF_SCAN_INTERVAL: int,
+    CONF_TRACK_CLIENTS: bool,
+    CONF_VERIFY_TLS: bool,
 }
 
 
@@ -43,18 +35,22 @@ async def async_get_config_entry_diagnostics(
     coordinator_fast = store.get("coordinator_fast")
 
     slow_data = (coordinator.data if coordinator is not None else None) or {}
-    firmware_data = slow_data.get("common_config") or slow_data.get("device") or {}
-    firmware = {
-        key: firmware_data[key]
-        for key in ("model", "model_name", "hardware_version", "wa_inner_version")
-        if isinstance(firmware_data, dict) and firmware_data.get(key) is not None
-    }
+    firmware = {}
+    for source in (slow_data.get("device"), slow_data.get("common_config")):
+        if isinstance(source, dict):
+            for key in ("model", "model_name", "hardware_version", "wa_inner_version"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    firmware[key] = value
+
+    # Never export a raw config entry: even its host URL can carry credentials.
+    settings = entry.data | entry.options
 
     return {
-        "config": async_redact_data(
-            {"data": dict(entry.data), "options": dict(entry.options)},
-            TO_REDACT,
-        ),
+        "config": {
+            key: settings[key] for key, value_type in SAFE_SETTINGS.items()
+            if type(settings.get(key)) is value_type
+        },
         "connection": {
             "login_method": api.login_method if api is not None else None,
             "session_status": (

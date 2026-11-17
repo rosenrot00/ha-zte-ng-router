@@ -41,11 +41,11 @@ Feature availability depends on router model and firmware.
 - Manual firmware check and a separate update-start button
 - GNSS latitude/longitude with fix status, source and the router's original fix time
 - Optional WLAN/LAN client trackers with MAC/IP/hostname and presence history
-- SMS inbox readout (count, unread, storage capacity + timestamp of the latest message)  
-- `zte_ng_router_sms_received` event for every newly received SMS (see [Received SMS](#received-sms))  
+- SMS inbox readout (count, unread, storage capacity + timestamp of the latest message)
+- `zte_ng_router_sms_received` event for incoming SMS (see [Received SMS](#received-sms))
 - SMS compose + send (via Home Assistant text field and button)  
 - Device information (model, firmware, IMEI/ICCID where available)  
-- Downloadable diagnostics (redacted config, login method, polling status, firmware identity; no router payloads)  
+- Downloadable diagnostics with selected settings, login method, polling status, and firmware identity; no router URL or raw payloads
 - Optional controls (e.g. reboot, mobile data on/off)
 
 If a feature is missing, please open an issue to report it.
@@ -143,11 +143,10 @@ not a timestamp.
 
 ## Authentication
 
-The router login is verified when you add the integration, so a wrong password or
-an unreachable router is reported right away instead of creating a broken entry. If
-the password stops working later (for example after it was changed on the router),
-Home Assistant starts its **reauthentication** flow and asks for the new password;
-polling is paused meanwhile so the router does not see a stream of failed logins.
+The integration verifies the router login during setup. When the router confirms
+that it rejected the stored password, Home Assistant asks you for the new password
+and polling pauses. Connection errors or ambiguous login replies do not trigger
+reauthentication.
 
 ## Requirements
 
@@ -155,13 +154,17 @@ polling is paused meanwhile so the router does not see a stream of failed logins
 
 ## Received SMS
 
-Sender numbers and message texts are intentionally **not** part of any entity state
-or attribute: both are stored by the recorder and readable by every Home Assistant
-user. The `Latest SMS` sensor only exposes the timestamp of the newest message plus
-counts and storage capacity.
+By default, the `Latest SMS` sensor shows the newest message timestamp and inbox
+metadata, without sender numbers or message text. Existing automations that use
+`latest_number`, `latest_text`, `recent_messages`, or the previous sensor state can
+still work: enable **Restore the SMS preview in the Latest SMS sensor** in the
+integration options to get the old behavior back.
 
-Every newly received SMS is announced once as a `zte_ng_router_sms_received` event
-instead. Use it as an automation trigger:
+Newly observed incoming messages trigger `zte_ng_router_sms_received`. The event
+contains `entry_id`, `name`, `id`, and `date`. The first successful inbox read
+after startup or reload establishes the baseline without triggering events. To
+include `number` and `text`, enable **Include sender and text in received SMS
+events**. This option is independent of the sensor preview:
 
 ```yaml
 triggers:
@@ -173,8 +176,11 @@ actions:
       message: "SMS from {{ trigger.event.data.number }}: {{ trigger.event.data.text }}"
 ```
 
-Event data: `entry_id`, `name`, `id`, `number`, `date`, `text`. Messages already in
-the inbox when Home Assistant starts are not replayed.
+Opted-in content may be visible to other Home Assistant users and stored in the
+recorder. To keep future event payloads out of the database, add
+`zte_ng_router_sms_received` to
+[the recorder's excluded event types](https://www.home-assistant.io/integrations/recorder/#event_types).
+Disabling either option does not erase data already recorded.
 
 ## SMS encryption
 

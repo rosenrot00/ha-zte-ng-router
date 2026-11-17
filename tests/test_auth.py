@@ -34,13 +34,29 @@ def router():
     return ZteRouterApi(session=object())
 
 
-SALT_OK = {"data": {"zte_web_sault": "salt"}}
+SALT_OK = {"success": True, "data": {"zte_web_sault": "salt", "login_fail_num": "4"}}
+UBUS_REJECTED = {"success": True, "data": {"result": "1", "debug": "router-internal-detail"}}
+LESS_ATTEMPTS = {"success": True, "data": {"zte_web_sault": "other", "login_fail_num": "3"}}
 
 
 class ApiLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporary_session_is_logged_out_without_retry(self):
+        api = router()
+        api._logged_in = True
+        api._session_id = "validation-only"
+        api.async_call_ubus = AsyncMock()
+        await api.async_end_validation_session()
+        api.async_call_ubus.assert_awaited_once_with(
+            {"service": "zwrt_web", "method": "web_logout", "params": {}},
+            session_id="validation-only",
+            retry_on_access_denied=False,
+            retry_on_connreset_104=False,
+        )
+        self.assertFalse(api.is_logged_in)
+
     async def test_ubus_rejected_password_raises_auth_error_without_goform_fallback(self):
         api = router()
-        api.async_call_ubus = AsyncMock(side_effect=[SALT_OK, {"data": {}}])
+        api.async_call_ubus = AsyncMock(side_effect=[SALT_OK, UBUS_REJECTED, LESS_ATTEMPTS])
         api._async_goform_login = AsyncMock()
 
         with self.assertRaises(ZteAuthError):
@@ -52,13 +68,57 @@ class ApiLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejection_message_does_not_echo_router_response(self):
         api = router()
         api.async_call_ubus = AsyncMock(
-            side_effect=[SALT_OK, {"data": {"debug": "router-internal-detail"}}]
+            side_effect=[SALT_OK, UBUS_REJECTED, LESS_ATTEMPTS]
         )
 
         with self.assertRaises(ZteAuthError) as raised:
             await api.async_login()
 
         self.assertNotIn("router-internal-detail", str(raised.exception))
+
+    async def test_ubus_timeout_and_incomplete_reply_still_fall_back(self):
+        for reply in ({"success": False, "error": {"message": "timeout"}},
+                      {"success": True, "data": {}}, {"success": True, "data": {"result": "0"}}):
+            with self.subTest(reply=reply):
+                api = router()
+                api.async_call_ubus = AsyncMock(side_effect=[SALT_OK, reply])
+                api._async_goform_login = AsyncMock()
+                await api.async_login()
+                api._async_goform_login.assert_awaited_once()
+
+    async def test_ubus_ambiguous_refusal_neither_retries_credentials_nor_starts_reauth(self):
+        api = router()
+        api.async_call_ubus = AsyncMock(side_effect=[SALT_OK, UBUS_REJECTED, SALT_OK])
+        api._async_goform_login = AsyncMock()
+        with self.assertRaises(api_module.ZteLoginRejected) as raised:
+            await api.async_login()
+        self.assertNotIsInstance(raised.exception, ZteAuthError)
+        api._async_goform_login.assert_not_awaited()
+
+    async def test_confirmed_invalid_password_blocks_subsequent_login_attempts(self):
+        api = router()
+        api.async_init_session = AsyncMock()
+        api.async_login = AsyncMock(side_effect=ZteAuthError("rejected"))
+        for force in (False, True):
+            with self.assertRaises(ZteAuthError):
+                await api._async_ensure_logged_in(force=force)
+        api.async_login.assert_awaited_once()
+
+    async def test_expired_batch_session_propagates_auth_error(self):
+        api = router()
+        api._logged_in = True
+        api._session_id = "old-session"
+        api._async_ensure_logged_in = AsyncMock(side_effect=ZteAuthError("rejected"))
+        response = types.SimpleNamespace(
+            raise_for_status=lambda: None,
+            text=AsyncMock(return_value='[{"id":1,"error":{"code":-32002}}]'),
+        )
+        context = AsyncMock()
+        context.__aenter__.return_value = response
+        api._session = types.SimpleNamespace(post=MagicMock(return_value=context))
+        with self.assertRaises(ZteAuthError):
+            await api.async_call_ubus_batch([{"service": "zwrt_router.api", "method": "router_get_status"}])
+        api._async_ensure_logged_in.assert_awaited_once_with(force=True)
 
     async def test_unsupported_ubus_still_falls_back_to_goform(self):
         api = router()
@@ -103,6 +163,17 @@ class ApiLoginTests(unittest.IsolatedAsyncioTestCase):
             await api.async_login()
 
         self.assertNotIsInstance(raised.exception, ZteAuthError)
+
+    async def test_goform_missing_reply_duplicate_login_and_lockout_are_not_auth_errors(self):
+        for reply in ({}, {"result": "2"}, {"result": "5"}):
+            with self.subTest(reply=reply):
+                api = router()
+                api._async_goform_init_session = AsyncMock()
+                api._async_goform_get = AsyncMock(return_value={"LD": "nonce"})
+                api._async_goform_set = AsyncMock(return_value=reply)
+                with self.assertRaises(RuntimeError) as raised:
+                    await api._async_goform_login()
+                self.assertNotIsInstance(raised.exception, ZteAuthError)
 
 
 def load_config_flow(validate_api):
@@ -165,7 +236,11 @@ class FakeApi:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.closed = False
+        self.logged_out = False
         FakeApi.instances.append(self)
+
+    async def async_init_session(self):
+        pass
 
     async def async_login(self):
         if FakeApi.outcome is not None:
@@ -173,6 +248,9 @@ class FakeApi:
 
     async def async_close(self):
         self.closed = True
+
+    async def async_end_validation_session(self):
+        self.logged_out = True
 
 
 config_flow = load_config_flow(FakeApi)
@@ -201,11 +279,13 @@ class ValidateLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_returns_none_and_closes_the_api(self):
         self.assertIsNone(await self._validate())
         self.assertTrue(FakeApi.instances[0].closed)
+        self.assertTrue(FakeApi.instances[0].logged_out)
 
     async def test_rejected_password_maps_to_invalid_auth(self):
         FakeApi.outcome = ZteAuthError("rejected")
         self.assertEqual(await self._validate(), "invalid_auth")
         self.assertTrue(FakeApi.instances[0].closed)
+        self.assertFalse(FakeApi.instances[0].logged_out)
 
     async def test_other_failures_map_to_cannot_connect(self):
         for failure in (RuntimeError("x"), OSError("x"), TimeoutError()):

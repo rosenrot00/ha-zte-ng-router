@@ -45,11 +45,15 @@
           "verify_tls": "Verify TLS certificate",
           "scan_interval": "Slow polling interval (seconds)",
           "track_wifi_clients": "Track network clients (Wi-Fi and LAN)",
-          "client_consider_home": "Client absence grace period (seconds)"
+          "client_consider_home": "Client absence grace period (seconds)",
+          "sms_event_content": "Include sender and text in received SMS events",
+          "sms_legacy_preview": "Restore the SMS preview in the Latest SMS sensor"
         },
         "data_description": {
           "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. Enable wanted trackers under Settings > Devices & services > Entities, including disabled entities.",
-          "client_consider_home": "Confirmed absence before reporting a client away (0-3600 seconds). Errors and polling pauses reset the grace period."
+          "client_consider_home": "Confirmed absence before reporting a client away (0-3600 seconds). Errors and polling pauses reset the grace period.",
+          "sms_event_content": "Off by default. If enabled, the event contains sensitive data that Home Assistant may record.",
+          "sms_legacy_preview": "Off by default. Restores the previous state and attributes for existing automations. The number and text are visible in the entity and may be recorded."
         }
       }
     }

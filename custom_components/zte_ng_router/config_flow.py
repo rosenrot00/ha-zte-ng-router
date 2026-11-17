@@ -20,6 +20,8 @@ from .const import (
     CONF_TRACK_CLIENTS,
     CONF_CLIENT_CONSIDER_HOME,
     DEFAULT_CLIENT_CONSIDER_HOME,
+    CONF_SMS_EVENT_CONTENT,
+    CONF_SMS_LEGACY_PREVIEW,
 )
 from .zte_api import ZteAuthError, ZteRouterApi
 
@@ -30,15 +32,14 @@ async def _async_validate_login(
     hass: HomeAssistant, *, host: str, password: str, verify_tls: bool
 ) -> str | None:
     """Try a real login. Return an error key, or None when the router accepts it."""
-    api = ZteRouterApi(
-        hass=hass,
-        base_url=host,
-        password=password,
-        verify_tls=verify_tls,
-        track_clients=False,
-    )
+    api = None
     try:
+        api = ZteRouterApi(
+            hass=hass, base_url=host, password=password, verify_tls=verify_tls,
+        )
+        await api.async_init_session()
         await api.async_login()
+        await api.async_end_validation_session()
         return None
     except ZteAuthError:
         return "invalid_auth"
@@ -47,7 +48,8 @@ async def _async_validate_login(
         _LOGGER.debug("Router login check failed: %s", type(exc).__name__)
         return "cannot_connect"
     finally:
-        await api.async_close()
+        if api is not None:
+            await api.async_close()
 
 
 class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -187,7 +189,9 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return ZteNgRouterOptionsFlow(config_entry)
 
 
-class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
+class ZteNgRouterOptionsFlow(
+    getattr(config_entries, "OptionsFlowWithReload", config_entries.OptionsFlow)
+):
     """Options flow for adjusting settings after initial setup."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
@@ -216,6 +220,8 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
             existing[CONF_CLIENT_CONSIDER_HOME] = user_input.get(
                 CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
             )
+            for key in (CONF_SMS_EVENT_CONTENT, CONF_SMS_LEGACY_PREVIEW):
+                existing[key] = user_input.get(key, existing.get(key, False))
 
             return self.async_create_entry(title="", data=existing)
 
@@ -265,6 +271,8 @@ class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
                         CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
                     )),
                 ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
+                vol.Optional(CONF_SMS_EVENT_CONTENT, default=options.get(CONF_SMS_EVENT_CONTENT, False)): bool,
+                vol.Optional(CONF_SMS_LEGACY_PREVIEW, default=options.get(CONF_SMS_LEGACY_PREVIEW, False)): bool,
             }
         )
 

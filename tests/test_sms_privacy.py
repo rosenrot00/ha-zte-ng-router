@@ -82,12 +82,13 @@ def _message(msg_id, tag="1", number=NUMBER, text=SECRET, date="26,11,16,10,30,0
 
 
 class SmsEntityPrivacyTests(unittest.TestCase):
-    def _sensor(self, messages):
+    def _sensor(self, messages, *, legacy=False):
         data = {"sms": {"messages": messages, "latest": messages[0] if messages else None,
                         "capacity": {"sms_nv_rev_total": "3"}}}
         coordinator = types.SimpleNamespace(data=data)
         return sensors.ZteNgRouterSensor(
             coordinator, "entry", "Router", "sms_latest", "Latest SMS", None, None, None,
+            sms_legacy_preview=legacy,
         )
 
     def test_state_contains_only_the_timestamp(self):
@@ -111,6 +112,14 @@ class SmsEntityPrivacyTests(unittest.TestCase):
         sensor = self._sensor([])
         self.assertIsNone(sensor.native_value)
         self.assertEqual(sensor.extra_state_attributes["total_messages"], 0)
+
+    def test_legacy_opt_in_restores_state_and_attributes(self):
+        sensor = self._sensor([_message("7")], legacy=True)
+        self.assertTrue(sensor.native_value.startswith(NUMBER + " @ "))
+        attrs = sensor.extra_state_attributes
+        self.assertEqual(attrs["latest_number"], NUMBER)
+        self.assertEqual(attrs["latest_text"], SECRET)
+        self.assertEqual(attrs["recent_messages"][0]["text"], SECRET)
 
 
 class SmsEventDetectionTests(unittest.TestCase):
@@ -136,10 +145,33 @@ class SmsEventDetectionTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in new], ["7"])
 
     def test_invalid_entries_are_ignored(self):
-        _, seen = sms_events.collect_new_incoming_sms(None, None)
+        _, seen = sms_events.collect_new_incoming_sms([], None)
         new, _ = sms_events.collect_new_incoming_sms(["x", {"id": None}, _message("9")], seen)
         self.assertEqual([m["id"] for m in new], ["9"])
         self.assertEqual(sms_events.collect_new_incoming_sms(None, seen)[0], [])
+
+    def test_failed_startup_does_not_establish_an_empty_baseline(self):
+        _, seen = sms_events.collect_new_incoming_sms(None, None)
+        self.assertIsNone(seen)
+        events, seen = sms_events.collect_new_incoming_sms([_message("old")], seen)
+        self.assertEqual(events, [])
+        self.assertEqual(len(seen), 1)
+
+    def test_empty_and_partial_reads_do_not_replay_or_duplicate_messages(self):
+        old = [_message("old")]
+        _, seen = sms_events.collect_new_incoming_sms(old, None)
+        for update in (None, [], [_message("other", tag="2")]):
+            _, seen = sms_events.collect_new_incoming_sms(update, seen)
+        new_message = _message("new")
+        events, _ = sms_events.collect_new_incoming_sms([new_message, new_message, *old], seen)
+        self.assertEqual(events, [new_message])
+
+    def test_event_content_is_independently_opt_in(self):
+        msg = _message("1")
+        public = sms_events.sms_event_data(msg, "entry", "Router", include_content=False)
+        self.assertEqual(set(public), {"entry_id", "name", "id", "date"})
+        private = sms_events.sms_event_data(msg, "entry", "Router", include_content=True)
+        self.assertEqual((private["number"], private["text"]), (NUMBER, SECRET))
 
 
 if __name__ == "__main__":

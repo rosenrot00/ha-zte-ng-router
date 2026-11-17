@@ -270,6 +270,7 @@ class SmsSendTests(unittest.IsolatedAsyncioTestCase):
 
         router.async_call_ubus_batch = AsyncMock(side_effect=batch)
         data = await router.async_update_all()
+        self.assertTrue(data["sms"]["inbox_available"])
         self.assertEqual(data["sms"]["latest"]["number"], "+48")
         self.assertEqual(data["sms"]["latest"]["content_decoded"], "Hi")
         self.assertEqual(data["sms"]["capacity"]["sms_nvused_total"], 12)
@@ -278,6 +279,26 @@ class SmsSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sms_batch.args[0]), 2)
         self.assertEqual(sms_batch.kwargs["z_mode_override"], "0")
         self.assertFalse(sms_batch.kwargs["log_raw_response"])
+
+    async def test_inbox_snapshot_distinguishes_failure_from_confirmed_empty(self):
+        for reply, available in (
+            ({"success": False, "data": {"messages": []}}, False),
+            ({"success": True, "data": {}}, False),
+            ({"success": True, "data": {"messages": []}}, True),
+        ):
+            with self.subTest(reply=reply):
+                router = api()
+
+                async def batch(calls, **kwargs):
+                    return [
+                        reply if call["method"] == "zte_libwms_get_sms_data" else {"success": True, "data": {}}
+                        for call in calls
+                    ]
+
+                router.async_call_ubus_batch = AsyncMock(side_effect=batch)
+                data = await router.async_update_all()
+                self.assertEqual(data["sms"]["inbox_available"], available)
+                self.assertEqual(data["sms"]["messages"], [])
 
 
 if __name__ == "__main__":

@@ -45,11 +45,15 @@
           "verify_tls": "TLS-Zertifikat pruefen",
           "scan_interval": "Langsames Abfrageintervall (Sekunden)",
           "track_wifi_clients": "Netzwerkgeraete verfolgen (WLAN und LAN)",
-          "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)"
+          "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)",
+          "sms_event_content": "Absender und Text in SMS-Ereignissen mitgeben",
+          "sms_legacy_preview": "SMS-Vorschau im Sensor der letzten SMS wiederherstellen"
         },
         "data_description": {
           "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Gewuenschte Tracker unter Einstellungen > Geraete & Dienste > Entitaeten aktivieren; deaktivierte Entitaeten einblenden.",
-          "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend (0-3600 Sekunden). Fehler und Polling-Pausen setzen die Frist zurueck."
+          "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend (0-3600 Sekunden). Fehler und Polling-Pausen setzen die Frist zurueck.",
+          "sms_event_content": "Standardmaessig aus. Home Assistant kann die sensiblen Daten im Ereignis speichern.",
+          "sms_legacy_preview": "Standardmaessig aus. Stellt den bisherigen Zustand und die Attribute fuer bestehende Automationen wieder her. Nummer und Text sind in der Entitaet sichtbar und koennen gespeichert werden."
         }
       }
     }

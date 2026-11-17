@@ -7,6 +7,8 @@ CONF_FAST_SCAN_INTERVAL = "fast_scan_interval"
 # Preserve the existing option key when extending tracking to wired clients.
 CONF_TRACK_CLIENTS = "track_wifi_clients"
 CONF_CLIENT_CONSIDER_HOME = "client_consider_home"
+CONF_SMS_EVENT_CONTENT = "sms_event_content"
+CONF_SMS_LEGACY_PREVIEW = "sms_legacy_preview"
 DEFAULT_CLIENT_CONSIDER_HOME = 180  # seconds of confirmed absence
 
 # Slow (full) update interval – used for most sensors

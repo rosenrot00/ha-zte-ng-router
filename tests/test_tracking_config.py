@@ -54,10 +54,16 @@ def load_flow():
         def __init__(self, **kwargs):
             pass
 
+        async def async_init_session(self):
+            pass
+
         async def async_login(self):
             pass
 
         async def async_close(self):
+            pass
+
+        async def async_end_validation_session(self):
             pass
 
     zte_api = types.ModuleType("zte_config_test.zte_api")
@@ -105,6 +111,18 @@ class TrackingConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["password"], "override")
         self.assertEqual(result["data"]["other_option"], "keep")
 
+    async def test_sms_options_default_off_and_are_independent(self):
+        entry = types.SimpleNamespace(data={"host": "http://192.0.2.1"}, options={})
+        options = flow.ZteNgRouterOptionsFlow(entry)
+        form = await options.async_step_init()
+        values = form["data_schema"]({})
+        self.assertFalse(values["sms_event_content"])
+        self.assertFalse(values["sms_legacy_preview"])
+        values["sms_legacy_preview"] = True
+        result = await options.async_step_init(values)
+        self.assertFalse(result["data"]["sms_event_content"])
+        self.assertTrue(result["data"]["sms_legacy_preview"])
+
     async def test_grace_bounds_and_translations(self):
         form = await flow.ZteNgRouterOptionsFlow(types.SimpleNamespace(data={}, options={})).async_step_init()
         for invalid in (-1, 3601, "invalid"):
@@ -118,6 +136,8 @@ class TrackingConfigTests(unittest.IsolatedAsyncioTestCase):
                 labels = translations[section]["step"][step]["data"]
                 self.assertIn("track_wifi_clients", labels)
                 self.assertIn("client_consider_home", labels)
+                self.assertEqual("sms_event_content" in labels, section == "options")
+                self.assertEqual("sms_legacy_preview" in labels, section == "options")
 
 
 if __name__ == "__main__":

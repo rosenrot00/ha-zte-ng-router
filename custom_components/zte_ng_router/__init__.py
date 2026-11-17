@@ -25,8 +25,9 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_FAST_SCAN_INTERVAL,
     CONF_TRACK_CLIENTS,
+    CONF_SMS_EVENT_CONTENT,
 )
-from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms
+from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms, sms_event_data
 from .zte_api import ZteAuthError, ZteRouterApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,25 +45,24 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 def _fire_sms_events(
     hass: HomeAssistant, entry: ConfigEntry, name: str, data: dict[str, Any]
 ) -> None:
-    """Fire one event per newly received SMS (never exposed via entity state)."""
+    """Publish newly received SMS without exposing content unless opted in."""
     store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if store is None:
         return
-    messages = (data.get("sms") or {}).get("messages")
+    sms = data.get("sms") or {}
+    if not sms.get("inbox_available"):
+        return
+    messages = sms.get("messages")
     new_messages, store["sms_seen"] = collect_new_incoming_sms(
         messages, store.get("sms_seen")
     )
     for message in new_messages:
         hass.bus.async_fire(
             EVENT_SMS_RECEIVED,
-            {
-                "entry_id": entry.entry_id,
-                "name": name,
-                "id": message.get("id"),
-                "number": message.get("number"),
-                "date": message.get("date"),
-                "text": message.get("content_decoded"),
-            },
+            sms_event_data(
+                message, entry.entry_id, name,
+                include_content=entry.options.get(CONF_SMS_EVENT_CONTENT, False),
+            ),
         )
 
 
@@ -72,7 +72,11 @@ def _stop_polling_for_reauth(hass: HomeAssistant, entry: ConfigEntry) -> None:
     Without this, every timer tick would send another failed login to the router
     until the user finished the reauth flow (which reloads the entry).
     """
-    cancel = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("cancel_polling")
+    store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if store is None:
+        return
+    store["reauth_required"] = True
+    cancel = store.get("cancel_polling")
     if callable(cancel):
         cancel()
 
@@ -156,6 +160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
+        config_entry=entry,
         name=f"zte_ng_router_{name}",
         update_method=_async_update_data,
         update_interval=None,
@@ -164,6 +169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator_fast = DataUpdateCoordinator(
         hass,
         _LOGGER,
+        config_entry=entry,
         name=f"zte_ng_router_{name}_fast",
         update_method=_async_update_fast,
         update_interval=None,
@@ -183,6 +189,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _schedule_polling() -> None:
         """Start integration-owned polling timers."""
         _cancel_polling()
+        if store.get("reauth_required"):
+            return
 
         async def _refresh_full(_now: datetime) -> None:
             await coordinator.async_refresh()

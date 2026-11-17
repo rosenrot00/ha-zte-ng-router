@@ -27,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, CONF_NAME
+from .const import DOMAIN, CONF_NAME, CONF_SMS_LEGACY_PREVIEW
 
 
 # key, name, device_class, unit, state_class
@@ -476,6 +476,13 @@ def _parse_sms_date(raw: Any) -> str | None:
         return dt.isoformat()
     except (TypeError, ValueError):
         return txt
+
+
+def _truncate_text(value: Any, max_len: int) -> str | None:
+    text = _as_text(value)
+    if text is not None and len(text) > max_len:
+        return f"{text[:max_len - 3]}..."
+    return text
 
 
 def _seconds_ago_to_datetime(value: Any) -> datetime | None:
@@ -936,6 +943,7 @@ async def async_setup_entry(
                 device_class=dev_class,
                 unit=unit,
                 state_class=state_class,
+                sms_legacy_preview=entry.options.get(CONF_SMS_LEGACY_PREVIEW, False),
             )
         )
 
@@ -957,9 +965,12 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         device_class: SensorDeviceClass | None,
         unit: str | None,
         state_class: SensorStateClass | None,
+        *,
+        sms_legacy_preview: bool = False,
     ) -> None:
         super().__init__(coordinator)
         self._key = key
+        self._sms_legacy_preview = sms_legacy_preview
         self._stable_timestamp: datetime | None = None
         self._last_relative_seconds: float | None = None
 
@@ -993,6 +1004,12 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         data: dict[str, Any] = self.coordinator.data or {}
         if self._key in {"connected_time", "uptime"}:
             return self._stable_relative_timestamp(data)
+        if self._key == "sms_latest" and self._sms_legacy_preview:
+            latest = (data.get("sms") or {}).get("latest")
+            if isinstance(latest, dict):
+                number = _as_text(latest.get("number")) or "Unknown"
+                date = _parse_sms_date(latest.get("date"))
+                return f"{number} @ {date}" if date else number
         return _extract_value(data, self._key)
 
     def _stable_relative_timestamp(self, data: dict[str, Any]) -> datetime | None:
@@ -1063,11 +1080,23 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         }
 
         if latest:
-            # No sender number and no message text here: attributes are stored by
-            # the recorder and readable by every user. Incoming messages are
-            # announced through the ``zte_ng_router_sms_received`` event instead.
             attrs["latest_id"] = latest.get("id")
             attrs["latest_tag"] = latest.get("tag")
             attrs["latest_date"] = _parse_sms_date(latest.get("date")) or latest.get("date")
+            if self._sms_legacy_preview:
+                attrs["latest_number"] = latest.get("number")
+                attrs["latest_text"] = _truncate_text(latest.get("content_decoded"), 500)
+
+        if self._sms_legacy_preview:
+            attrs["recent_messages"] = [
+                {
+                    "id": msg.get("id"),
+                    "number": msg.get("number"),
+                    "date": _parse_sms_date(msg.get("date")) or msg.get("date"),
+                    "tag": msg.get("tag"),
+                    "text": _truncate_text(msg.get("content_decoded"), 140),
+                }
+                for msg in messages[:5] if isinstance(msg, dict)
+            ]
 
         return attrs

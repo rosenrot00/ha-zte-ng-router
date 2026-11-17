@@ -12,28 +12,10 @@ DOMAIN = "zte_ng_router"
 
 
 def load_diagnostics():
-    def redact(value, keys):
-        if isinstance(value, dict):
-            return {
-                key: "**REDACTED**" if key in keys else redact(item, keys)
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [redact(item, keys) for item in value]
-        return value
-
-    diagnostics_component = types.ModuleType("homeassistant.components.diagnostics")
-    diagnostics_component.async_redact_data = redact
-    components = types.ModuleType("homeassistant.components")
-    components.diagnostics = diagnostics_component
-    const = types.ModuleType("homeassistant.const")
-    const.CONF_PASSWORD = "password"
     core = types.ModuleType("homeassistant.core")
     core.HomeAssistant = object
     config_entries = types.ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = object
-    homeassistant = types.ModuleType("homeassistant")
-    homeassistant.components = components
 
     package = types.ModuleType("zte_diagnostics_test")
     package.__path__ = [str(ROOT)]
@@ -44,11 +26,7 @@ def load_diagnostics():
     with patch.dict(
         sys.modules,
         {
-            "homeassistant": homeassistant,
-            "homeassistant.components": components,
-            "homeassistant.components.diagnostics": diagnostics_component,
             "homeassistant.config_entries": config_entries,
-            "homeassistant.const": const,
             "homeassistant.core": core,
             "zte_diagnostics_test": package,
             spec.name: module,
@@ -82,8 +60,11 @@ def _hass(store):
 def _entry():
     return types.SimpleNamespace(
         entry_id="entry-id",
-        data={"host": "https://192.0.2.1", "password": "do-not-export"},
-        options={"token": "do-not-export"},
+        data={"host": "https://user:url-secret@192.0.2.1", "password": "data-secret",
+              "scan_interval": 30, "verify_tls": True},
+        options={"host": "https://example.org/?token=option-secret", "token": "do-not-export",
+                 "future_setting": "future-secret", "scan_interval": 60,
+                 "fast_scan_interval": "not-a-number-secret"},
     )
 
 
@@ -95,8 +76,8 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         result = await diagnostics.async_get_config_entry_diagnostics(hass, _entry())
 
-        self.assertEqual(result["config"]["data"]["password"], "**REDACTED**")
-        self.assertEqual(result["config"]["options"]["token"], "**REDACTED**")
+        self.assertEqual(result["config"], {"scan_interval": 60, "verify_tls": True})
+        self.assertNotIn("secret", repr(result))
         self.assertEqual(result["connection"]["login_method"], "ubus")
         self.assertEqual(result["connection"]["session_status"], "authenticated")
         self.assertEqual(result["connection"]["firmware"]["model"], "G5TS")
@@ -107,7 +88,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_entry_that_has_not_finished_setup_still_returns_diagnostics(self):
         result = await diagnostics.async_get_config_entry_diagnostics(_hass({}), _entry())
 
-        self.assertEqual(result["config"]["data"]["password"], "**REDACTED**")
+        self.assertEqual(result["config"], {"scan_interval": 60, "verify_tls": True})
         self.assertIsNone(result["connection"]["login_method"])
         self.assertEqual(result["connection"]["session_status"], "not_authenticated")
         self.assertEqual(result["connection"]["firmware"], {})

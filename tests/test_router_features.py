@@ -164,7 +164,7 @@ class PollingGroupTests(unittest.IsolatedAsyncioTestCase):
             store = {"coordinator": slow, "coordinator_fast": fast_coordinator, "name": "Router"}
             hass = types.SimpleNamespace(data={"zte_ng_router": {"entry": store}})
             entities = []
-            await sensors.async_setup_entry(hass, types.SimpleNamespace(entry_id="entry"), entities.extend)
+            await sensors.async_setup_entry(hass, types.SimpleNamespace(entry_id="entry", options={}), entities.extend)
             self.assertEqual(len(entities), len(sensors.SENSOR_DEFS))
             for entity in entities:
                 expected = fast if fast_coordinator is not None and entity._key in fast_keys else slow
