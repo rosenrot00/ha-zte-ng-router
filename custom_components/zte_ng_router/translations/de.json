@@ -16,10 +16,24 @@
           "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Neue Tracker sind deaktiviert, bis du sie in den Entitaetseinstellungen aktivierst.",
           "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend. Standard 180 Sekunden; Fehler und Polling-Pausen setzen die Frist zurueck."
         }
+      },
+      "reauth_confirm": {
+        "title": "{name} erneut authentifizieren",
+        "description": "Der Router hat das gespeicherte Passwort abgelehnt. Gib das aktuelle Router-Passwort ein.",
+        "data": {
+          "password": "Router-Passwort"
+        }
       }
     },
-    "error": {"invalid_scan_interval": "Das Abfrageintervall muss zwischen 5 und 3600 Sekunden liegen."},
-    "abort": {"already_configured": "Dieser Router ist bereits eingerichtet."}
+    "error": {
+      "invalid_scan_interval": "Das Abfrageintervall muss zwischen 5 und 3600 Sekunden liegen.",
+      "invalid_auth": "Der Router hat das Passwort abgelehnt.",
+      "cannot_connect": "Anmeldung am Router fehlgeschlagen. Pruefe die Router-URL und die Erreichbarkeit."
+    },
+    "abort": {
+      "already_configured": "Dieser Router ist bereits eingerichtet.",
+      "reauth_successful": "Die erneute Authentifizierung war erfolgreich."
+    }
   },
   "options": {
     "step": {

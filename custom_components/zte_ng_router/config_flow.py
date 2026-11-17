@@ -7,7 +7,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 
 from .const import (
     DOMAIN,
@@ -21,8 +21,33 @@ from .const import (
     CONF_CLIENT_CONSIDER_HOME,
     DEFAULT_CLIENT_CONSIDER_HOME,
 )
+from .zte_api import ZteAuthError, ZteRouterApi
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _async_validate_login(
+    hass: HomeAssistant, *, host: str, password: str, verify_tls: bool
+) -> str | None:
+    """Try a real login. Return an error key, or None when the router accepts it."""
+    api = ZteRouterApi(
+        hass=hass,
+        base_url=host,
+        password=password,
+        verify_tls=verify_tls,
+        track_clients=False,
+    )
+    try:
+        await api.async_login()
+        return None
+    except ZteAuthError:
+        return "invalid_auth"
+    except Exception as exc:  # noqa: BLE001 - any other failure: router not usable
+        # Do not log the exception text; it may echo router response content.
+        _LOGGER.debug("Router login check failed: %s", type(exc).__name__)
+        return "cannot_connect"
+    finally:
+        await api.async_close()
 
 
 class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -44,8 +69,19 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"zte_ng_router_{host}")
             self._abort_if_unique_id_configured()
 
+            login_error: str | None = None
+            if MIN_SCAN_INTERVAL <= scan_interval <= MAX_SCAN_INTERVAL:
+                login_error = await _async_validate_login(
+                    self.hass,
+                    host=host,
+                    password=user_input[CONF_PASSWORD],
+                    verify_tls=user_input[CONF_VERIFY_TLS],
+                )
+
             if scan_interval < MIN_SCAN_INTERVAL or scan_interval > MAX_SCAN_INTERVAL:
                 errors["base"] = "invalid_scan_interval"
+            elif login_error:
+                errors["base"] = login_error
             else:
                 return self.async_create_entry(
                     title=name,
@@ -62,20 +98,36 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
+        # Keep what the user typed (except the password) after a failed attempt.
+        previous = user_input or {}
         schema = vol.Schema(
             {
-                vol.Required(CONF_NAME, default="ZTE NG Router"): str,
-                vol.Required(CONF_HOST, default="http://192.168.0.1"): str,
+                vol.Required(
+                    CONF_NAME, default=previous.get(CONF_NAME, "ZTE NG Router")
+                ): str,
+                vol.Required(
+                    CONF_HOST, default=previous.get(CONF_HOST, "http://192.168.0.1")
+                ): str,
                 vol.Required(CONF_PASSWORD): str,
-                vol.Optional(CONF_VERIFY_TLS, default=False): bool,
-                vol.Required(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(
+                vol.Optional(
+                    CONF_VERIFY_TLS, default=previous.get(CONF_VERIFY_TLS, False)
+                ): bool,
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=previous.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                ): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
                 ),
-                vol.Optional(CONF_TRACK_CLIENTS, default=False): bool,
-                vol.Optional(CONF_CLIENT_CONSIDER_HOME, default=DEFAULT_CLIENT_CONSIDER_HOME): vol.All(
-                    vol.Coerce(int), vol.Range(min=0, max=3600),
-                ),
+                vol.Optional(
+                    CONF_TRACK_CLIENTS, default=previous.get(CONF_TRACK_CLIENTS, False)
+                ): bool,
+                vol.Optional(
+                    CONF_CLIENT_CONSIDER_HOME,
+                    default=previous.get(
+                        CONF_CLIENT_CONSIDER_HOME, DEFAULT_CLIENT_CONSIDER_HOME
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
             }
         )
 
@@ -83,6 +135,49 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=schema,
             errors=errors,
+        )
+
+    async def async_step_reauth(self, entry_data: dict[str, Any]):
+        """Start reauthentication after the stored password stopped working."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None):
+        """Ask for the router password again and verify it with a live login."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        assert entry is not None
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Same precedence as setup: options override the original entry data.
+            host = entry.options.get(CONF_HOST, entry.data[CONF_HOST])
+            verify_tls = entry.options.get(
+                CONF_VERIFY_TLS, entry.data.get(CONF_VERIFY_TLS, False)
+            )
+            password = user_input[CONF_PASSWORD]
+            login_error = await _async_validate_login(
+                self.hass, host=host, password=password, verify_tls=verify_tls
+            )
+            if login_error:
+                errors["base"] = login_error
+            else:
+                # Store the new password in data and drop a stale copy in options,
+                # which would otherwise keep taking precedence.
+                new_options = {
+                    key: value
+                    for key, value in entry.options.items()
+                    if key != CONF_PASSWORD
+                }
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={**entry.data, CONF_PASSWORD: password},
+                    options=new_options,
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
+            errors=errors,
+            description_placeholders={"name": entry.title},
         )
 
     @staticmethod

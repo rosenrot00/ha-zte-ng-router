@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -26,7 +27,7 @@ from .const import (
     CONF_TRACK_CLIENTS,
 )
 from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms
-from .zte_api import ZteRouterApi
+from .zte_api import ZteAuthError, ZteRouterApi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +64,17 @@ def _fire_sms_events(
                 "text": message.get("content_decoded"),
             },
         )
+
+
+def _stop_polling_for_reauth(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Stop the integration-owned poll timers while the password is invalid.
+
+    Without this, every timer tick would send another failed login to the router
+    until the user finished the reauth flow (which reloads the entry).
+    """
+    cancel = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("cancel_polling")
+    if callable(cancel):
+        cancel()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -116,6 +128,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise UpdateFailed("No data returned from router")
             _fire_sms_events(hass, entry, name, data)
             return data
+        except ZteAuthError as err:
+            _stop_polling_for_reauth(hass, entry)
+            raise ConfigEntryAuthFailed(str(err)) from err
         except Exception as err:
             _LOGGER.error("Error updating ZTE router data: %s", err)
             raise UpdateFailed(str(err)) from err
@@ -131,6 +146,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if fast_data is None:
                 raise UpdateFailed("No fast data returned from router")
             return fast_data
+        except ZteAuthError as err:
+            _stop_polling_for_reauth(hass, entry)
+            raise ConfigEntryAuthFailed(str(err)) from err
         except Exception as err:
             _LOGGER.error("Error updating ZTE router fast data: %s", err)
             raise UpdateFailed(str(err)) from err
