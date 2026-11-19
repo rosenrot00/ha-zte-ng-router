@@ -7,6 +7,9 @@ import types
 import unittest
 from unittest.mock import patch
 
+from ha_exceptions import HomeAssistantError, ServiceValidationError
+from ha_entities import Entity
+
 
 def load_switches():
     root = Path(__file__).resolve().parents[1] / "custom_components/zte_ng_router"
@@ -15,15 +18,22 @@ def load_switches():
     modules = {"zte_switch_test": package}
 
     class CoordinatorEntity:
+        def __init__(self, coordinator):
+            self.coordinator = coordinator
+
         @property
         def available(self):
             return self.coordinator.last_update_success
 
     symbols = {
         "homeassistant.util": {"dt": object()},
-        "homeassistant.components.switch": {"SwitchEntity": type("SwitchEntity", (), {})},
+        "homeassistant.components.switch": {"SwitchEntity": Entity},
         "homeassistant.config_entries": {"ConfigEntry": object},
         "homeassistant.core": {"HomeAssistant": object},
+        "homeassistant.exceptions": {
+            "HomeAssistantError": HomeAssistantError,
+            "ServiceValidationError": ServiceValidationError,
+        },
         "homeassistant.helpers.entity": {"DeviceInfo": dict},
         "homeassistant.helpers.entity_registry": {"async_get": None},
         "homeassistant.helpers.update_coordinator": {

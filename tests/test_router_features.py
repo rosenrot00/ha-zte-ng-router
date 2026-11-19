@@ -9,6 +9,8 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from ha_exceptions import HomeAssistantError, ServiceValidationError
+from ha_entities import Entity
 from test_sensor_defaults import sensors
 from test_sms import api
 
@@ -28,10 +30,13 @@ def load_buttons():
             return self.coordinator.last_update_success
 
     symbols = {
-        "homeassistant.components.button": {"ButtonEntity": type("ButtonEntity", (), {})},
+        "homeassistant.components.button": {"ButtonEntity": Entity},
         "homeassistant.config_entries": {"ConfigEntry": object},
         "homeassistant.core": {"HomeAssistant": object},
-        "homeassistant.exceptions": {"HomeAssistantError": type("HomeAssistantError", (Exception,), {})},
+        "homeassistant.exceptions": {
+            "HomeAssistantError": HomeAssistantError,
+            "ServiceValidationError": ServiceValidationError,
+        },
         "homeassistant.helpers.entity": {
             "DeviceInfo": dict, "EntityCategory": types.SimpleNamespace(CONFIG="config"),
         },
@@ -54,6 +59,33 @@ OFFER = {"new_version_state": "version_has_new_optional_software", "current_upgr
 
 
 class FeatureSensorTests(unittest.TestCase):
+    def test_monthly_counters_use_total_increasing_without_changing_identity_or_unit(self):
+        for key in ("monthly_download_mb", "monthly_upload_mb"):
+            with self.subTest(key=key):
+                definition = next(d for d in sensors.SENSOR_DEFS if d[0] == key)
+                _, device_class, unit, state_class = definition
+                self.assertEqual((device_class, unit, state_class), ("data_size", "B", "total_increasing"))
+                self.assertNotIn(key, sensors.FAST_SENSOR_KEYS)
+                coordinator = types.SimpleNamespace(data={})
+                entity = sensors.ZteNgRouterSensor(
+                    coordinator, "entry", "Router", key, device_class, unit, state_class,
+                )
+                self.assertEqual(entity._attr_unique_id, f"entry_{key}")
+                self.assertEqual(entity._attr_state_class, "total_increasing")
+                self.assertEqual(entity._attr_native_unit_of_measurement, "B")
+
+    def test_monthly_counter_resets_and_missing_readings_are_not_confused(self):
+        for key, field in (("monthly_download_mb", "month_rx_bytes"), ("monthly_upload_mb", "month_tx_bytes")):
+            with self.subTest(key=key):
+                self.assertIsNone(sensors._extract_value({}, key))
+                for source in ("wwandst_monthly", "wan"):
+                    for value in ("9007199254740993", "1250", "0", 0):
+                        self.assertEqual(sensors._extract_value({source: {field: value}}, key), int(value))
+                    for invalid in (None, "", "-", -1, "nan", "inf"):
+                        self.assertIsNone(sensors._extract_value({source: {field: invalid}}, key))
+                data = {"wwandst_monthly": {field: 0}, "wan": {field: 5000}}
+                self.assertEqual(sensors._extract_value(data, key), 0)
+
     def test_live_data_limit_shape_and_disabled_values_are_retained(self):
         data = {"data_limit": {"enable": 0, "type": 2, "value": "0", "ratio": 0, "overflow": 0},
                 "traffic_reset": {"enable": 1, "clearday": 1}}
@@ -72,7 +104,7 @@ class FeatureSensorTests(unittest.TestCase):
         entity = object.__new__(sensors.ZteNgRouterSensor)
         entity._key = "data_limit_value"
         definition = next(d for d in sensors.SENSOR_DEFS if d[0] == entity._key)
-        self.assertEqual(definition[2:], (None, None, None))
+        self.assertEqual(definition[1:], (None, None, None))
         for mode, name, unit in ((1, "connection_time", "s"), ("2", "data_volume", "router_native"),
                                   (3, None, None)):
             entity.coordinator = types.SimpleNamespace(data={"data_limit": {"type": mode, "value": "3600"}})
@@ -607,8 +639,9 @@ class FirmwareButtonTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_gets_error_when_command_rejected(self):
         entity = self.button("check_firmware_update", OFFER)
         entity._api.async_check_firmware_update.return_value = False
-        with self.assertRaisesRegex(Exception, "Router rejected"):
+        with self.assertRaises(HomeAssistantError) as caught:
             await entity.async_press()
+        self.assertEqual(caught.exception.translation_key, "button_action_failed")
         entity.coordinator.async_request_refresh.assert_not_awaited()
 
 

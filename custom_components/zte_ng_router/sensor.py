@@ -34,110 +34,110 @@ from .wifi import wifi_flag, wifi_master_state
 WIFI_SENSOR_KEYS = frozenset({"wifi_onoff", "main2g_ssid", "main5g_ssid", "radio_off", "connected_wifi_devices"})
 
 
-# key, name, device_class, unit, state_class
+# key / translation_key, device_class, unit, state_class
 SENSOR_DEFS = [
     # General network info
-    ("network_provider", "Network Provider", None, None, None),
-    ("connection_type", "Connection Type", None, None, None),
+    ("network_provider", None, None, None),
+    ("connection_type", None, None, None),
 
     # Wi-Fi (public zwrt_wlan/report)
-    ("wifi_onoff", "WiFi Enabled", None, None, None),
-    ("main2g_ssid", "WiFi 2.4 GHz SSID", None, None, None),
-    ("main5g_ssid", "WiFi 5 GHz SSID", None, None, None),
+    ("wifi_onoff", None, None, None),
+    ("main2g_ssid", None, None, None),
+    ("main5g_ssid", None, None, None),
 
     # Net identifiers / locks
-    ("signalbar", "Signal Bars", None, None, SensorStateClass.MEASUREMENT),
-    ("rmcc", "RMCC", None, None, None),
-    ("rmnc", "RMNC", None, None, None),
-    ("nr_active_band", "NR Active Band", None, None, None),
-    ("lte_primary_band", "LTE Primary Band", None, None, None),
-    ("nr5g_cell_id", "NR5G Cell ID", None, None, None),
-    ("lac_code", "LAC Code", None, None, None),
-    ("lte_band_lock", "LTE Band Lock", None, None, None),
-    ("gw_band_lock", "GW Band Lock", None, None, None),
+    ("signalbar", None, None, SensorStateClass.MEASUREMENT),
+    ("rmcc", None, None, None),
+    ("rmnc", None, None, None),
+    ("nr_active_band", None, None, None),
+    ("lte_primary_band", None, None, None),
+    ("nr5g_cell_id", None, None, None),
+    ("lac_code", None, None, None),
+    ("lte_band_lock", None, None, None),
+    ("gw_band_lock", None, None, None),
 
     # Bands and total bandwidth
-    ("bands_summary", "Bands", None, None, None),
-    ("total_bandwidth", "Total Bandwidth", None, "MHz", SensorStateClass.MEASUREMENT),
+    ("bands_summary", None, None, None),
+    ("total_bandwidth", None, "MHz", SensorStateClass.MEASUREMENT),
 
     # Primary RSRP (LTE preferred, NR fallback)
     #("primary_rsrp", "Primary RSRP", None, "dBm", SensorStateClass.MEASUREMENT),
 
     # LTE metrics
-    ("lte_pci", "LTE PCI", None, None, None),
-    ("lte_earfcn", "LTE EARFCN", None, None, None),
-    ("lte_rsrp", "LTE RSRP", None, "dBm", SensorStateClass.MEASUREMENT),
-    ("lte_rsrq", "LTE RSRQ", None, "dB", SensorStateClass.MEASUREMENT),
-    ("lte_sinr", "LTE SINR", None, "dB", SensorStateClass.MEASUREMENT),
-    ("lte_rssi", "LTE RSSI", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("lte_pci", None, None, None),
+    ("lte_earfcn", None, None, None),
+    ("lte_rsrp", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("lte_rsrq", None, "dB", SensorStateClass.MEASUREMENT),
+    ("lte_sinr", None, "dB", SensorStateClass.MEASUREMENT),
+    ("lte_rssi", None, "dBm", SensorStateClass.MEASUREMENT),
 
     # NR / 5G metrics
-    ("nr_pci", "NR PCI", None, None, None),
-    ("nr_arfcn", "NR ARFCN", None, None, None),
-    ("nr_rsrp", "NR RSRP", None, "dBm", SensorStateClass.MEASUREMENT),
-    ("nr_rsrq", "NR RSRQ", None, "dB", SensorStateClass.MEASUREMENT),
-    ("nr_sinr", "NR SINR", None, "dB", SensorStateClass.MEASUREMENT),
-    ("nr_rssi", "NR RSSI", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("nr_pci", None, None, None),
+    ("nr_arfcn", None, None, None),
+    ("nr_rsrp", None, "dBm", SensorStateClass.MEASUREMENT),
+    ("nr_rsrq", None, "dB", SensorStateClass.MEASUREMENT),
+    ("nr_sinr", None, "dB", SensorStateClass.MEASUREMENT),
+    ("nr_rssi", None, "dBm", SensorStateClass.MEASUREMENT),
 
     # WAN / system
-    ("wan_ipv4", "WAN IPv4", None, None, None),
-    ("wan_ipv6", "WAN IPv6", None, None, None),
-    ("wan_status", "WAN Status", None, None, None),
-    ("wan_link_state", "WAN Link State", None, None, None),
-    ("modem_main_state", "Modem Main State", None, None, None),
-    ("radio_off", "Radio Off", None, None, None),
-    ("hightemp_datalimit_status", "High Temperature Limit Status", None, None, None),
-    ("5g_modem_temperature", "5G Modem Temperature", SensorDeviceClass.TEMPERATURE,
+    ("wan_ipv4", None, None, None),
+    ("wan_ipv6", None, None, None),
+    ("wan_status", None, None, None),
+    ("wan_link_state", None, None, None),
+    ("modem_main_state", None, None, None),
+    ("radio_off", None, None, None),
+    ("hightemp_datalimit_status", None, None, None),
+    ("5g_modem_temperature", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
-    ("modem_temperature", "Modem Temperature", SensorDeviceClass.TEMPERATURE,
+    ("modem_temperature", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
-    ("pa_temp_level", "PA Temp Level", None, None, None),
-    ("tj_temp_level", "TJ Temp Level", None, None, None),
-    ("connected_lan_devices", "Connected LAN Devices", None, None, SensorStateClass.MEASUREMENT),
-    ("connected_wifi_devices", "Connected WiFi Devices", None, None, SensorStateClass.MEASUREMENT),
-    ("download_rate", "Download Rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
-    ("upload_rate", "Upload Rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
-    ("monthly_download_mb", "Monthly Download", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.MEASUREMENT),
-    ("monthly_upload_mb", "Monthly Upload", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.MEASUREMENT),
-    ("daily_download", "Daily Download", SensorDeviceClass.DATA_SIZE,
+    ("pa_temp_level", None, None, None),
+    ("tj_temp_level", None, None, None),
+    ("connected_lan_devices", None, None, SensorStateClass.MEASUREMENT),
+    ("connected_wifi_devices", None, None, SensorStateClass.MEASUREMENT),
+    ("download_rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
+    ("upload_rate", SensorDeviceClass.DATA_RATE, UnitOfDataRate.BITS_PER_SECOND, SensorStateClass.MEASUREMENT),
+    ("monthly_download_mb", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
+    ("monthly_upload_mb", SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
+    ("daily_download", SensorDeviceClass.DATA_SIZE,
      UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
-    ("daily_upload", "Daily Upload", SensorDeviceClass.DATA_SIZE,
+    ("daily_upload", SensorDeviceClass.DATA_SIZE,
      UnitOfInformation.BYTES, SensorStateClass.TOTAL_INCREASING),
-    ("data_limit_enabled", "Data Limit Enabled", None, None, None),
-    ("data_limit_type", "Data Limit Type", None, None, None),
-    ("data_limit_value", "Data Limit Value", None, None, None),
-    ("data_limit_warning_percent", "Data Limit Warning Threshold", None, PERCENTAGE,
+    ("data_limit_enabled", None, None, None),
+    ("data_limit_type", None, None, None),
+    ("data_limit_value", None, None, None),
+    ("data_limit_warning_percent", None, PERCENTAGE,
      SensorStateClass.MEASUREMENT),
-    ("data_limit_exceeded", "Data Limit Exceeded", None, None, None),
-    ("traffic_auto_reset", "Traffic Auto Reset Enabled", None, None, None),
-    ("traffic_reset_day", "Traffic Reset Day", None, None, None),
-    ("rx_packet_errors", "Received Packet Errors", None, None, SensorStateClass.TOTAL_INCREASING),
-    ("tx_packet_errors", "Transmitted Packet Errors", None, None, SensorStateClass.TOTAL_INCREASING),
-    ("rx_packet_drops", "Received Packet Drops", None, None, SensorStateClass.TOTAL_INCREASING),
-    ("tx_packet_drops", "Transmitted Packet Drops", None, None, SensorStateClass.TOTAL_INCREASING),
-    ("sms_count", "SMS Count", None, None, SensorStateClass.MEASUREMENT),
-    ("sms_unread_total", "SMS Unread", None, None, SensorStateClass.MEASUREMENT),
-    ("sms_nv_total", "SMS NV Total", None, None, SensorStateClass.MEASUREMENT),
-    ("sms_sim_total", "SMS SIM Total", None, None, SensorStateClass.MEASUREMENT),
-    ("sms_nv_used_total", "SMS NV Used", None, None, SensorStateClass.MEASUREMENT),
-    ("sms_latest", "Latest SMS", None, None, None),
-    ("connected_time", "Connected Since", SensorDeviceClass.TIMESTAMP,
+    ("data_limit_exceeded", None, None, None),
+    ("traffic_auto_reset", None, None, None),
+    ("traffic_reset_day", None, None, None),
+    ("rx_packet_errors", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("tx_packet_errors", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("rx_packet_drops", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("tx_packet_drops", None, None, SensorStateClass.TOTAL_INCREASING),
+    ("sms_count", None, None, SensorStateClass.MEASUREMENT),
+    ("sms_unread_total", None, None, SensorStateClass.MEASUREMENT),
+    ("sms_nv_total", None, None, SensorStateClass.MEASUREMENT),
+    ("sms_sim_total", None, None, SensorStateClass.MEASUREMENT),
+    ("sms_nv_used_total", None, None, SensorStateClass.MEASUREMENT),
+    ("sms_latest", None, None, None),
+    ("connected_time", SensorDeviceClass.TIMESTAMP,
      None, None),
-    ("hardware_version", "Hardware Version", None, None, None),
-    ("wa_inner_version", "WA Inner Version", None, None, None),
-    ("cpu_usage", "CPU Usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
-    ("ram_usage", "RAM Usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
-    ("cpu_temp", "CPU Temperature", SensorDeviceClass.TEMPERATURE,
+    ("hardware_version", None, None, None),
+    ("wa_inner_version", None, None, None),
+    ("cpu_usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
+    ("ram_usage", None, PERCENTAGE, SensorStateClass.MEASUREMENT),
+    ("cpu_temp", SensorDeviceClass.TEMPERATURE,
      UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT),
-    ("uptime", "Device Started", SensorDeviceClass.TIMESTAMP,
+    ("uptime", SensorDeviceClass.TIMESTAMP,
      None, None),
-    ("firmware_update_status", "Firmware Update Status", None, None, None),
-    ("firmware_latest_version", "Firmware Latest Version", None, None, None),
-    ("firmware_download_progress", "Firmware Download Progress", None, PERCENTAGE,
+    ("firmware_update_status", None, None, None),
+    ("firmware_latest_version", None, None, None),
+    ("firmware_download_progress", None, PERCENTAGE,
      SensorStateClass.MEASUREMENT),
-    ("gnss_latitude", "GNSS Latitude", None, DEGREE, None),
-    ("gnss_longitude", "GNSS Longitude", None, DEGREE, None),
-    ("gnss_fix", "GNSS Fix", None, None, None),
+    ("gnss_latitude", None, DEGREE, None),
+    ("gnss_longitude", None, DEGREE, None),
+    ("gnss_fix", None, None, None),
 ]
 
 
@@ -923,7 +923,7 @@ async def async_setup_entry(
     router_name: str = data["name"]  # name given in config flow
 
     entities: list[ZteNgRouterSensor] = []
-    for key, name, dev_class, unit, state_class in SENSOR_DEFS:
+    for key, dev_class, unit, state_class in SENSOR_DEFS:
         use_coordinator = (
             coordinator_fast
             if coordinator_fast is not None and key in FAST_SENSOR_KEYS
@@ -936,7 +936,6 @@ async def async_setup_entry(
                 entry_id=entry.entry_id,
                 router_name=router_name,
                 key=key,
-                name=name,
                 device_class=dev_class,
                 unit=unit,
                 state_class=state_class,
@@ -951,6 +950,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
     """Single ZTE NG Router sensor entity reading from the coordinator."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -958,7 +958,6 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         entry_id: str,
         router_name: str,
         key: str,
-        name: str,
         device_class: SensorDeviceClass | None,
         unit: str | None,
         state_class: SensorStateClass | None,
@@ -971,8 +970,7 @@ class ZteNgRouterSensor(CoordinatorEntity, SensorEntity):
         self._stable_timestamp: datetime | None = None
         self._last_relative_seconds: float | None = None
 
-        # Entity name: "<Router name> <Sensor name>"
-        self._attr_name = f"{router_name} {name}"
+        self._attr_translation_key = key
 
         # unique_id includes entry_id so multiple routers can coexist
         self._attr_unique_id = f"{entry_id}_{key}"

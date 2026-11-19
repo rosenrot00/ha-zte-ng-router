@@ -2,6 +2,7 @@ DOMAIN = "zte_ng_router"
 
 CONF_NAME = "name"
 CONF_VERIFY_TLS = "verify_tls"
+CONF_TLS_FINGERPRINT = "tls_fingerprint"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_FAST_SCAN_INTERVAL = "fast_scan_interval"
 # Preserve the existing option key when extending tracking to wired clients.

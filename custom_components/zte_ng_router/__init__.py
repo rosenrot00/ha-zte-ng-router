@@ -20,6 +20,7 @@ from .const import (
     DOMAIN,
     CONF_NAME,
     CONF_VERIFY_TLS,
+    CONF_TLS_FINGERPRINT,
     CONF_SCAN_INTERVAL,
     CONF_FAST_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -27,6 +28,7 @@ from .const import (
     CONF_TRACK_CLIENTS,
     CONF_SMS_EVENT_CONTENT,
 )
+from .device_info import async_update_device_info
 from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms, sms_event_data
 from .zte_api import ZteAuthError, ZteRouterApi
 
@@ -117,6 +119,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         base_url=host,
         password=password,
         verify_tls=verify_tls,
+        tls_fingerprint=options.get(CONF_TLS_FINGERPRINT, data.get(CONF_TLS_FINGERPRINT, "")),
         track_clients=options.get(CONF_TRACK_CLIENTS, data.get(CONF_TRACK_CLIENTS, False)),
     )
 
@@ -130,6 +133,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = await api.async_update_all()
             if data is None:
                 raise UpdateFailed("No data returned from router")
+            async_update_device_info(hass, entry.entry_id, name, data)
             _fire_sms_events(hass, entry, name, data)
             return data
         except ZteAuthError as err:

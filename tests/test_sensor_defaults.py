@@ -7,6 +7,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from ha_entities import Entity
 
 def load_sensors():
     root = Path(__file__).resolve().parents[1] / "custom_components/zte_ng_router"
@@ -24,7 +25,7 @@ def load_sensors():
 
     symbols = {
         "homeassistant.components.sensor": {
-            "SensorEntity": type("SensorEntity", (), {}),
+            "SensorEntity": Entity,
             "SensorDeviceClass": types.SimpleNamespace(
                 TEMPERATURE="temperature", DATA_RATE="data_rate", DATA_SIZE="data_size",
                 TIMESTAMP="timestamp",
@@ -71,10 +72,10 @@ class SensorDefaultTests(unittest.TestCase):
     def test_only_wifi_sensors_become_unavailable_and_keep_their_ids(self):
         coordinator = types.SimpleNamespace(data={"wifi_available": False}, last_update_success=True)
         wifi_keys = {"wifi_onoff", "main2g_ssid", "main5g_ssid", "radio_off", "connected_wifi_devices"}
-        for key, name, device_class, unit, state_class in sensors.SENSOR_DEFS:
+        for key, device_class, unit, state_class in sensors.SENSOR_DEFS:
             with self.subTest(key=key):
                 entity = sensors.ZteNgRouterSensor(
-                    coordinator, "entry", "Router", key, name, device_class, unit, state_class,
+                    coordinator, "entry", "Router", key, device_class, unit, state_class,
                 )
                 self.assertEqual(entity._attr_unique_id, f"entry_{key}")
                 self.assertEqual(entity.available, key not in wifi_keys)
@@ -136,9 +137,9 @@ class SensorDefaultTests(unittest.TestCase):
     def test_entities_are_retained_with_same_ids_and_values(self):
         data = {"common_config": {"model_name": "G5TC"}}
         coordinator = types.SimpleNamespace(data=data)
-        for key, name, device_class, unit, state_class in sensors.SENSOR_DEFS:
+        for key, device_class, unit, state_class in sensors.SENSOR_DEFS:
             entity = sensors.ZteNgRouterSensor(
-                coordinator, "entry", "Router", key, name, device_class, unit, state_class,
+                coordinator, "entry", "Router", key, device_class, unit, state_class,
             )
             self.assertEqual(entity._attr_unique_id, f"entry_{key}")
             self.assertEqual(entity._attr_entity_registry_enabled_default, key not in OPTIONAL_KEYS)

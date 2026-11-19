@@ -8,11 +8,13 @@
           "host": "Router URL",
           "password": "Router password",
           "verify_tls": "Verify TLS certificate",
+          "tls_fingerprint": "TLS certificate SHA-256 fingerprint (optional)",
           "scan_interval": "Slow polling interval (seconds)",
           "track_wifi_clients": "Track network clients (Wi-Fi and LAN)",
           "client_consider_home": "Client absence grace period (seconds)"
         },
         "data_description": {
+          "tls_fingerprint": "HTTPS only. Enter a fingerprint verified independently. Colons and uppercase are accepted. Overrides certificate verification; leave empty to use the Verify TLS certificate setting.",
           "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. New trackers are disabled until enabled in the entity settings.",
           "client_consider_home": "Confirmed absence before reporting a client away. Default 180 seconds; errors and polling pauses reset the grace period."
         }
@@ -28,7 +30,12 @@
     "error": {
       "invalid_scan_interval": "The polling interval must be between 5 and 3600 seconds.",
       "invalid_auth": "The router rejected the password.",
-      "cannot_connect": "Could not log in to the router. Check the router URL and that it is reachable."
+      "cannot_connect": "Could not log in to the router. Check the router URL and that it is reachable.",
+      "invalid_tls_fingerprint": "Enter a SHA-256 fingerprint with 64 hexadecimal characters, optionally separated by colons.",
+      "tls_fingerprint_requires_https": "A certificate fingerprint requires an https:// router URL. Clear it to use HTTP.",
+      "tls_error": "The TLS connection or certificate check failed. Check the router certificate and TLS settings.",
+      "tls_fingerprint_mismatch": "The router certificate does not match the configured fingerprint. Verify the certificate before changing the fingerprint.",
+      "tls_redirect": "The pinned router connection returned a redirect. Enter the direct HTTPS URL; redirects are not followed with certificate pinning."
     },
     "abort": {
       "already_configured": "This router is already configured.",
@@ -43,6 +50,7 @@
           "host": "Router URL",
           "password": "New router password (leave empty to keep current)",
           "verify_tls": "Verify TLS certificate",
+          "tls_fingerprint": "TLS certificate SHA-256 fingerprint (optional)",
           "scan_interval": "Slow polling interval (seconds)",
           "track_wifi_clients": "Track network clients (Wi-Fi and LAN)",
           "client_consider_home": "Client absence grace period (seconds)",
@@ -50,11 +58,331 @@
           "sms_legacy_preview": "Restore the SMS preview in the Latest SMS sensor"
         },
         "data_description": {
+          "tls_fingerprint": "HTTPS only. Overrides certificate verification. Clear this field to restore the Verify TLS certificate setting. A changed certificate requires a newly verified fingerprint.",
           "track_wifi_clients": "Read-only WLAN and LAN device discovery during slow polling. Enable wanted trackers under Settings > Devices & services > Entities, including disabled entities.",
           "client_consider_home": "Confirmed absence before reporting a client away (0-3600 seconds). Errors and polling pauses reset the grace period.",
           "sms_event_content": "Off by default. If enabled, the event contains sensitive data that Home Assistant may record.",
           "sms_legacy_preview": "Off by default. Restores the previous state and attributes for existing automations. The number and text are visible in the entity and may be recorded."
         }
+      }
+    },
+    "error": {
+      "invalid_tls_fingerprint": "Enter a SHA-256 fingerprint with 64 hexadecimal characters, optionally separated by colons.",
+      "tls_fingerprint_requires_https": "A certificate fingerprint requires an https:// router URL. Clear it to use HTTP."
+    }
+  },
+  "exceptions": {
+    "switch_on_failed": {
+      "message": "Could not turn on {name}. The router action failed or could not be confirmed."
+    },
+    "switch_off_failed": {
+      "message": "Could not turn off {name}. The router action failed or could not be confirmed."
+    },
+    "button_action_failed": {
+      "message": "Could not complete {name}. The router action failed or could not be confirmed."
+    },
+    "cell_lock_text_missing": {
+      "message": "The input entity for {kind} cell lock is missing. Enable the corresponding text entity before turning on cell lock."
+    },
+    "invalid_cell_lock": {
+      "message": "Enter valid {kind} cell lock values in the corresponding text entity using the format {format}."
+    },
+    "invalid_sms": {
+      "message": "Enter a valid destination number and a non-empty message in the SMS text entity using the format number,message."
+    },
+    "sms_send_failed": {
+      "message": "SMS sending failed or could not be confirmed. Check the router before retrying to avoid duplicate messages."
+    },
+    "sms_encryption_unavailable": {
+      "message": "SMS encryption is not ready or could not be determined for this router."
+    },
+    "firmware_command_unavailable": {
+      "message": "The firmware command is not supported or the update status does not allow it. Refresh the router status before trying again."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "network_provider": {
+        "name": "Network provider"
+      },
+      "connection_type": {
+        "name": "Connection type"
+      },
+      "wifi_onoff": {
+        "name": "WiFi enabled"
+      },
+      "main2g_ssid": {
+        "name": "WiFi 2.4 GHz SSID"
+      },
+      "main5g_ssid": {
+        "name": "WiFi 5 GHz SSID"
+      },
+      "signalbar": {
+        "name": "Signal bars"
+      },
+      "rmcc": {
+        "name": "RMCC"
+      },
+      "rmnc": {
+        "name": "RMNC"
+      },
+      "nr_active_band": {
+        "name": "NR active band"
+      },
+      "lte_primary_band": {
+        "name": "LTE primary band"
+      },
+      "nr5g_cell_id": {
+        "name": "NR5G cell id"
+      },
+      "lac_code": {
+        "name": "LAC code"
+      },
+      "lte_band_lock": {
+        "name": "LTE band lock"
+      },
+      "gw_band_lock": {
+        "name": "GW band lock"
+      },
+      "bands_summary": {
+        "name": "Bands"
+      },
+      "total_bandwidth": {
+        "name": "Total bandwidth"
+      },
+      "lte_pci": {
+        "name": "LTE PCI"
+      },
+      "lte_earfcn": {
+        "name": "LTE EARFCN"
+      },
+      "lte_rsrp": {
+        "name": "LTE RSRP"
+      },
+      "lte_rsrq": {
+        "name": "LTE RSRQ"
+      },
+      "lte_sinr": {
+        "name": "LTE SINR"
+      },
+      "lte_rssi": {
+        "name": "LTE RSSI"
+      },
+      "nr_pci": {
+        "name": "NR PCI"
+      },
+      "nr_arfcn": {
+        "name": "NR ARFCN"
+      },
+      "nr_rsrp": {
+        "name": "NR RSRP"
+      },
+      "nr_rsrq": {
+        "name": "NR RSRQ"
+      },
+      "nr_sinr": {
+        "name": "NR SINR"
+      },
+      "nr_rssi": {
+        "name": "NR RSSI"
+      },
+      "wan_ipv4": {
+        "name": "WAN IPv4"
+      },
+      "wan_ipv6": {
+        "name": "WAN IPv6"
+      },
+      "wan_status": {
+        "name": "WAN status"
+      },
+      "wan_link_state": {
+        "name": "WAN link state"
+      },
+      "modem_main_state": {
+        "name": "Modem main state"
+      },
+      "radio_off": {
+        "name": "Radio off"
+      },
+      "hightemp_datalimit_status": {
+        "name": "High temperature limit status"
+      },
+      "5g_modem_temperature": {
+        "name": "5G modem temperature"
+      },
+      "modem_temperature": {
+        "name": "Modem temperature"
+      },
+      "pa_temp_level": {
+        "name": "PA temp level"
+      },
+      "tj_temp_level": {
+        "name": "TJ temp level"
+      },
+      "connected_lan_devices": {
+        "name": "Connected LAN devices"
+      },
+      "connected_wifi_devices": {
+        "name": "Connected WiFi devices"
+      },
+      "download_rate": {
+        "name": "Download rate"
+      },
+      "upload_rate": {
+        "name": "Upload rate"
+      },
+      "monthly_download_mb": {
+        "name": "Monthly download"
+      },
+      "monthly_upload_mb": {
+        "name": "Monthly upload"
+      },
+      "daily_download": {
+        "name": "Daily download"
+      },
+      "daily_upload": {
+        "name": "Daily upload"
+      },
+      "data_limit_enabled": {
+        "name": "Data limit enabled"
+      },
+      "data_limit_type": {
+        "name": "Data limit type"
+      },
+      "data_limit_value": {
+        "name": "Data limit value"
+      },
+      "data_limit_warning_percent": {
+        "name": "Data limit warning threshold"
+      },
+      "data_limit_exceeded": {
+        "name": "Data limit exceeded"
+      },
+      "traffic_auto_reset": {
+        "name": "Traffic auto reset enabled"
+      },
+      "traffic_reset_day": {
+        "name": "Traffic reset day"
+      },
+      "rx_packet_errors": {
+        "name": "Received packet errors"
+      },
+      "tx_packet_errors": {
+        "name": "Transmitted packet errors"
+      },
+      "rx_packet_drops": {
+        "name": "Received packet drops"
+      },
+      "tx_packet_drops": {
+        "name": "Transmitted packet drops"
+      },
+      "sms_count": {
+        "name": "SMS count"
+      },
+      "sms_unread_total": {
+        "name": "SMS unread"
+      },
+      "sms_nv_total": {
+        "name": "SMS NV total"
+      },
+      "sms_sim_total": {
+        "name": "SMS SIM total"
+      },
+      "sms_nv_used_total": {
+        "name": "SMS NV used"
+      },
+      "sms_latest": {
+        "name": "Latest SMS"
+      },
+      "connected_time": {
+        "name": "Connected since"
+      },
+      "hardware_version": {
+        "name": "Hardware version"
+      },
+      "wa_inner_version": {
+        "name": "WA inner version"
+      },
+      "cpu_usage": {
+        "name": "CPU usage"
+      },
+      "ram_usage": {
+        "name": "RAM usage"
+      },
+      "cpu_temp": {
+        "name": "CPU temperature"
+      },
+      "uptime": {
+        "name": "Device started"
+      },
+      "firmware_update_status": {
+        "name": "Firmware update status"
+      },
+      "firmware_latest_version": {
+        "name": "Firmware latest version"
+      },
+      "firmware_download_progress": {
+        "name": "Firmware download progress"
+      },
+      "gnss_latitude": {
+        "name": "GNSS latitude"
+      },
+      "gnss_longitude": {
+        "name": "GNSS longitude"
+      },
+      "gnss_fix": {
+        "name": "GNSS fix"
+      }
+    },
+    "switch": {
+      "odu_led": {
+        "name": "LED"
+      },
+      "wifi_master": {
+        "name": "WiFi"
+      },
+      "wifi_main_2g": {
+        "name": "WiFi 2 GHz"
+      },
+      "wifi_main_5g": {
+        "name": "WiFi 5 GHz"
+      },
+      "mobile_data": {
+        "name": "Mobile data"
+      },
+      "pause_polling": {
+        "name": "Pause polling (5 min)"
+      },
+      "cell_lock_4g_enabled": {
+        "name": "Cell lock 4G"
+      },
+      "cell_lock_5g_enabled": {
+        "name": "Cell lock 5G"
+      }
+    },
+    "button": {
+      "restart": {
+        "name": "Restart"
+      },
+      "send_sms": {
+        "name": "Send SMS"
+      },
+      "check_firmware_update": {
+        "name": "Check firmware update"
+      },
+      "start_firmware_update": {
+        "name": "Start firmware update"
+      }
+    },
+    "text": {
+      "cell_lock_4g_text": {
+        "name": "Cell lock 4G"
+      },
+      "cell_lock_5g_text": {
+        "name": "Cell lock 5G"
+      },
+      "sms_compose_text": {
+        "name": "SMS compose"
       }
     }
   }

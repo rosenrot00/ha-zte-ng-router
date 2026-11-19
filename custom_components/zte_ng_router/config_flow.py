@@ -13,6 +13,7 @@ from .const import (
     DOMAIN,
     CONF_NAME,
     CONF_VERIFY_TLS,
+    CONF_TLS_FINGERPRINT,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
@@ -23,19 +24,21 @@ from .const import (
     CONF_SMS_EVENT_CONTENT,
     CONF_SMS_LEGACY_PREVIEW,
 )
-from .zte_api import ZteAuthError, ZteRouterApi
+from .zte_api import ZteAuthError, ZteRouterApi, ZteTlsError, normalize_tls_fingerprint
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def _async_validate_login(
-    hass: HomeAssistant, *, host: str, password: str, verify_tls: bool
+    hass: HomeAssistant, *, host: str, password: str, verify_tls: bool,
+    tls_fingerprint: str = "",
 ) -> str | None:
     """Try a real login. Return an error key, or None when the router accepts it."""
     api = None
     try:
         api = ZteRouterApi(
             hass=hass, base_url=host, password=password, verify_tls=verify_tls,
+            tls_fingerprint=tls_fingerprint,
         )
         await api.async_init_session()
         await api.async_login()
@@ -43,6 +46,8 @@ async def _async_validate_login(
         return None
     except ZteAuthError:
         return "invalid_auth"
+    except ZteTlsError as exc:
+        return exc.reason
     except Exception as exc:  # noqa: BLE001 - any other failure: router not usable
         # Do not log the exception text; it may echo router response content.
         _LOGGER.debug("Router login check failed: %s", type(exc).__name__)
@@ -72,19 +77,25 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             login_error: str | None = None
-            if MIN_SCAN_INTERVAL <= scan_interval <= MAX_SCAN_INTERVAL:
+            fingerprint = ""
+            try:
+                fingerprint = normalize_tls_fingerprint(user_input.get(CONF_TLS_FINGERPRINT, ""), host)
+            except ValueError as exc:
+                errors[CONF_TLS_FINGERPRINT] = str(exc)
+            if not errors and MIN_SCAN_INTERVAL <= scan_interval <= MAX_SCAN_INTERVAL:
                 login_error = await _async_validate_login(
                     self.hass,
                     host=host,
                     password=user_input[CONF_PASSWORD],
                     verify_tls=user_input[CONF_VERIFY_TLS],
+                    tls_fingerprint=fingerprint,
                 )
 
             if scan_interval < MIN_SCAN_INTERVAL or scan_interval > MAX_SCAN_INTERVAL:
                 errors["base"] = "invalid_scan_interval"
             elif login_error:
                 errors["base"] = login_error
-            else:
+            elif not errors:
                 return self.async_create_entry(
                     title=name,
                     data={
@@ -92,6 +103,7 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_HOST: host,
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                         CONF_VERIFY_TLS: user_input[CONF_VERIFY_TLS],
+                        CONF_TLS_FINGERPRINT: fingerprint,
                         CONF_SCAN_INTERVAL: scan_interval,
                         CONF_TRACK_CLIENTS: user_input.get(CONF_TRACK_CLIENTS, False),
                         CONF_CLIENT_CONSIDER_HOME: user_input.get(
@@ -114,6 +126,9 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_VERIFY_TLS, default=previous.get(CONF_VERIFY_TLS, False)
                 ): bool,
+                vol.Optional(
+                    CONF_TLS_FINGERPRINT, default=previous.get(CONF_TLS_FINGERPRINT, "")
+                ): str,
                 vol.Required(
                     CONF_SCAN_INTERVAL,
                     default=previous.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
@@ -157,7 +172,8 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             password = user_input[CONF_PASSWORD]
             login_error = await _async_validate_login(
-                self.hass, host=host, password=password, verify_tls=verify_tls
+                self.hass, host=host, password=password, verify_tls=verify_tls,
+                tls_fingerprint=entry.options.get(CONF_TLS_FINGERPRINT, entry.data.get(CONF_TLS_FINGERPRINT, "")),
             )
             if login_error:
                 errors["base"] = login_error
@@ -200,7 +216,18 @@ class ZteNgRouterOptionsFlow(
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         """Handle options for the config entry (host, password, verify_tls, scan_interval)."""
+        errors: dict[str, str] = {}
         if user_input is not None:
+            try:
+                fingerprint = normalize_tls_fingerprint(
+                    user_input.get(CONF_TLS_FINGERPRINT, self._config_entry.options.get(
+                        CONF_TLS_FINGERPRINT, self._config_entry.data.get(CONF_TLS_FINGERPRINT, "")
+                    )),
+                    user_input[CONF_HOST],
+                )
+            except ValueError as exc:
+                errors[CONF_TLS_FINGERPRINT] = str(exc)
+        if user_input is not None and not errors:
             # Build merged options: start from existing options, then override
             existing = dict(self._config_entry.options)
 
@@ -215,6 +242,7 @@ class ZteNgRouterOptionsFlow(
 
             # TLS and scan interval always from the form
             existing[CONF_VERIFY_TLS] = user_input[CONF_VERIFY_TLS]
+            existing[CONF_TLS_FINGERPRINT] = fingerprint
             existing[CONF_SCAN_INTERVAL] = user_input[CONF_SCAN_INTERVAL]
             existing[CONF_TRACK_CLIENTS] = user_input.get(CONF_TRACK_CLIENTS, False)
             existing[CONF_CLIENT_CONSIDER_HOME] = user_input.get(
@@ -227,7 +255,8 @@ class ZteNgRouterOptionsFlow(
 
         # Current values: prefer options, fallback to data
         data = self._config_entry.data
-        options = self._config_entry.options
+        options = dict(self._config_entry.options)
+        options.update({key: value for key, value in (user_input or {}).items() if key != CONF_PASSWORD})
 
         current_host = options.get(CONF_HOST, data.get(CONF_HOST, "http://192.168.0.1"))
         # We never show the current password in plain text; user can overwrite it if needed.
@@ -254,6 +283,10 @@ class ZteNgRouterOptionsFlow(
                     CONF_VERIFY_TLS,
                     default=current_verify_tls,
                 ): bool,
+                vol.Optional(
+                    CONF_TLS_FINGERPRINT,
+                    default=options.get(CONF_TLS_FINGERPRINT, data.get(CONF_TLS_FINGERPRINT, "")),
+                ): str,
                 vol.Required(
                     CONF_SCAN_INTERVAL,
                     default=current_scan_interval,
@@ -276,4 +309,4 @@ class ZteNgRouterOptionsFlow(
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

@@ -10,6 +10,8 @@ import os
 import re
 import time
 import string
+import ssl
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +21,38 @@ from aiohttp import ClientError, ClientSession, CookieJar
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class ZteTlsError(RuntimeError):
+    """A TLS failure safe to report without certificate or URL contents."""
+
+    def __init__(self, reason: str = "tls_error") -> None:
+        self.reason = reason
+        super().__init__({
+            "tls_error": "Router TLS certificate verification failed",
+            "tls_fingerprint_mismatch": "Router TLS certificate fingerprint does not match",
+            "tls_redirect": "Pinned HTTPS connection refused a redirect; use the router's direct HTTPS URL",
+        }[reason])
+
+
+def normalize_tls_fingerprint(value: str | None, host: str) -> str:
+    """Accept an optional SHA-256 certificate digest, never a pin for HTTP."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("invalid_tls_fingerprint")
+    if not value.strip():
+        return ""
+    fingerprint = value.strip().replace(":", "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+        raise ValueError("invalid_tls_fingerprint")
+    try:
+        is_https = urlsplit(host).scheme.lower() == "https"
+    except ValueError:
+        is_https = False
+    if not is_https:
+        raise ValueError("tls_fingerprint_requires_https")
+    return fingerprint
 
 
 class ZteLoginRejected(RuntimeError):
@@ -70,6 +104,7 @@ class ZteRouterApi:
         verify_tls: bool = True,
         session: ClientSession | None = None,
         track_clients: bool = False,
+        tls_fingerprint: str | None = None,
     ) -> None:
         # base_url like "http://192.168.254.1" or "https://192.168.254.1"
         self.hass = hass
@@ -77,6 +112,11 @@ class ZteRouterApi:
         self._browser_base_url = self._strip_url_userinfo(self.base_url)
         self.password = password
         self.verify_tls = verify_tls
+        self.tls_fingerprint = normalize_tls_fingerprint(tls_fingerprint, self.base_url)
+        self._ssl = (
+            aiohttp.Fingerprint(bytes.fromhex(self.tls_fingerprint))
+            if self.tls_fingerprint else verify_tls
+        )
         self._sms_encryption: str | None = None
         self.track_clients = track_clients
         self._client_snapshot_ok: bool | None = None
@@ -89,7 +129,7 @@ class ZteRouterApi:
             # ZTE write ACL checks depend on the router cookie jar, not only the
             # explicit webtoken header. Home Assistant's shared client session
             # uses a dummy cookie jar, so use a dedicated router session.
-            connector = aiohttp.TCPConnector(ssl=verify_tls)
+            connector = aiohttp.TCPConnector(ssl=self._ssl)
             jar = CookieJar(unsafe=True)
             self._session = aiohttp.ClientSession(connector=connector, cookie_jar=jar)
 
@@ -126,6 +166,33 @@ class ZteRouterApi:
     def _ubus_url(self) -> str:
         # WebUI uses a cache-busting timestamp query param
         return f"{self.base_url}/ubus/?t={int(time.time() * 1000)}"
+
+    @asynccontextmanager
+    async def _request(self, session: ClientSession, method: str, url: str, **kwargs: Any):
+        """Use one TLS policy for every request, including injected sessions."""
+        if urlsplit(url).scheme.lower() == "https":
+            kwargs["ssl"] = self._ssl
+        if self.tls_fingerprint:
+            # aiohttp redirects may change origin or downgrade to HTTP.
+            kwargs["allow_redirects"] = False
+        try:
+            async with getattr(session, method.lower())(url, **kwargs) as response:
+                if self.tls_fingerprint and 300 <= response.status < 400:
+                    raise ZteTlsError("tls_redirect")
+                yield response
+        except Exception as exc:
+            if isinstance(exc, ZteTlsError):
+                self._mark_session_stale()
+                raise
+            reason = None
+            if isinstance(exc, getattr(aiohttp, "ServerFingerprintMismatch", ())):
+                reason = "tls_fingerprint_mismatch"
+            elif isinstance(exc, ssl.SSLError) or isinstance(exc, getattr(aiohttp, "ClientSSLError", ())):
+                reason = "tls_error"
+            if reason is not None:
+                self._mark_session_stale()
+                raise ZteTlsError(reason) from None
+            raise
 
     @staticmethod
     def _strip_url_userinfo(url: str) -> str:
@@ -538,7 +605,7 @@ class ZteRouterApi:
         """Fetch the start page to get cookies/CSRF (if any)."""
         url = self.base_url + "/"
         try:
-            async with self._session.get(url, timeout=10) as resp:
+            async with self._request(self._session, "GET", url, timeout=10) as resp:
                 await resp.read()
                 _LOGGER.debug("async_init_session: status=%s", resp.status)
         except (ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -556,7 +623,7 @@ class ZteRouterApi:
             await self._async_ubus_login()
             self._api_mode = "ubus"
             return
-        except ZteLoginRejected:
+        except (ZteLoginRejected, ZteTlsError):
             # Don't submit the password again after a definitive protocol reply.
             raise
         except Exception as exc:
@@ -566,7 +633,7 @@ class ZteRouterApi:
         try:
             await self._async_goform_login()
             return
-        except ZteLoginRejected:
+        except (ZteLoginRejected, ZteTlsError):
             raise
         except Exception as goform_exc:
             if ubus_exc is None:
@@ -731,6 +798,8 @@ class ZteRouterApi:
             else:
                 _LOGGER.warning("ZTE web_http_enstr_set did not succeed (code=%s)",
                                 self._rpc_error_code(set_res.get("error")))
+        except ZteTlsError:
+            raise
         except Exception as exc:
             _LOGGER.debug("Failed to setup ZTE web HTTP encryption: %s", type(exc).__name__)
 
@@ -740,8 +809,7 @@ class ZteRouterApi:
     async def _async_get_goform_session(self) -> aiohttp.ClientSession:
         """Return (creating if needed) a dedicated aiohttp session with unsafe cookie jar."""
         if self._goform_session is None:
-            ssl_ctx: bool = False if not self.verify_tls else True
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            connector = aiohttp.TCPConnector(ssl=self._ssl)
             jar = aiohttp.CookieJar(unsafe=True)
             self._goform_session = aiohttp.ClientSession(connector=connector, cookie_jar=jar)
         return self._goform_session
@@ -765,11 +833,13 @@ class ZteRouterApi:
             "X-Requested-With": "XMLHttpRequest",
         }
         try:
-            async with session.get(
-                url, params=params, headers=headers,
+            async with self._request(
+                session, "GET", url, params=params, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 return await resp.json(content_type=None)
+        except ZteTlsError:
+            raise
         except Exception as exc:
             _LOGGER.warning("GoForm GET %s failed: %s", cmd, type(exc).__name__)
             return {}
@@ -784,11 +854,13 @@ class ZteRouterApi:
             "X-Requested-With": "XMLHttpRequest",
         }
         try:
-            async with session.post(
-                url, data=data, headers=headers,
+            async with self._request(
+                session, "POST", url, data=data, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 return await resp.json(content_type=None)
+        except ZteTlsError:
+            raise
         except Exception as exc:
             _LOGGER.warning("GoForm POST failed: %s", type(exc).__name__)
             return {}
@@ -798,9 +870,11 @@ class ZteRouterApi:
         session = await self._async_get_goform_session()
         url = f"{self.base_url}/index.html"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with self._request(session, "GET", url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 await resp.read()
                 _LOGGER.debug("GoForm session init: status=%s", resp.status)
+        except ZteTlsError:
+            raise
         except Exception as exc:
             _LOGGER.warning("GoForm session initialization failed: %s", type(exc).__name__)
 
@@ -1238,14 +1312,16 @@ class ZteRouterApi:
             except Exception:
                 pass
 
-            async with self._session.post(
-                url,
+            async with self._request(
+                self._session, "POST", url,
                 data=json.dumps(req, separators=(",", ":")),
                 headers=headers,
                 timeout=10,
             ) as resp:
                 resp.raise_for_status()
                 res_list = await resp.json(content_type=None)
+        except ZteTlsError:
+            raise
         except Exception as exc:
             _LOGGER.warning("HTTP error while calling ubus: %s", type(exc).__name__)
 
@@ -1257,6 +1333,8 @@ class ZteRouterApi:
 
                 try:
                     await self._async_ensure_logged_in(force=True)
+                except ZteTlsError:
+                    raise
                 except Exception as exc2:
                     _LOGGER.error("Re-login failed after 104: %s", type(exc2).__name__)
                     return {"success": False, "data": None, "error": {"message": "login_failed"}}
@@ -1308,6 +1386,8 @@ class ZteRouterApi:
 
                 try:
                     await self._async_ensure_logged_in(force=True)
+                except ZteTlsError:
+                    raise
                 except Exception as exc:
                     _LOGGER.error("Re-login failed: %s", type(exc).__name__)
                     return {"success": False, "data": None, "error": {"message": "login_failed"}}
@@ -1399,8 +1479,8 @@ class ZteRouterApi:
             headers = dict(self._base_headers)
             headers["Z-Mode"] = z_mode_override if z_mode_override is not None else "1"
             headers.setdefault("X-Requested-With", "XMLHttpRequest")
-            async with self._session.post(
-                url,
+            async with self._request(
+                self._session, "POST", url,
                 data=json.dumps(req, separators=(",", ":")),
                 headers=headers,
                 timeout=10,
@@ -1435,7 +1515,7 @@ class ZteRouterApi:
                             retry_on_connreset_104=retry_on_connreset_104,
                             retry_on_access_denied=False,
                         )
-        except ZteAuthError:
+        except (ZteAuthError, ZteTlsError):
             raise
         except Exception as exc:
             _LOGGER.warning(
@@ -1450,7 +1530,7 @@ class ZteRouterApi:
                 self._mark_session_stale()
                 try:
                     await self._async_ensure_logged_in(force=True)
-                except ZteAuthError:
+                except (ZteAuthError, ZteTlsError):
                     raise
                 except Exception as exc2:
                     _LOGGER.error("Re-login failed after 104 during batch: %s", type(exc2).__name__)
@@ -1827,6 +1907,8 @@ class ZteRouterApi:
         if self._api_mode == "goform":
             try:
                 return await self._async_goform_update_fast()
+            except ZteTlsError:
+                raise
             except Exception as exc:
                 _LOGGER.warning("GoForm fast update failed, retrying with re-login: %s", exc)
                 self._mark_session_stale()
@@ -1986,6 +2068,8 @@ class ZteRouterApi:
         if self._api_mode == "goform":
             try:
                 return await self._async_goform_update_all()
+            except ZteTlsError:
+                raise
             except Exception as exc:
                 _LOGGER.warning("GoForm full update failed, retrying with re-login: %s", exc)
                 self._mark_session_stale()
@@ -2124,6 +2208,8 @@ class ZteRouterApi:
                 network_clients = await self._async_read_network_clients_locked(
                     user_list_num if user_list_num_res.get("success") else None
                 )
+            except ZteTlsError:
+                raise
             except Exception:
                 # Client tracking is optional; do not fail unrelated sensors/SMS.
                 _LOGGER.debug("Network client snapshot unavailable")

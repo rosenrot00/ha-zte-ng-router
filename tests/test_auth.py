@@ -207,6 +207,8 @@ def load_config_flow(validate_api):
     fake_api = types.ModuleType("zte_cf_test.zte_api")
     fake_api.ZteAuthError = ZteAuthError
     fake_api.ZteRouterApi = validate_api
+    fake_api.ZteTlsError = api_module.ZteTlsError
+    fake_api.normalize_tls_fingerprint = api_module.normalize_tls_fingerprint
 
     spec = importlib.util.spec_from_file_location("zte_cf_test.config_flow", ROOT / "config_flow.py")
     module = importlib.util.module_from_spec(spec)
@@ -292,6 +294,21 @@ class ValidateLoginTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(failure=type(failure).__name__):
                 FakeApi.outcome = failure
                 self.assertEqual(await self._validate(), "cannot_connect")
+
+    async def test_tls_failures_are_not_mapped_to_password_errors(self):
+        for reason in ("tls_error", "tls_fingerprint_mismatch", "tls_redirect"):
+            FakeApi.outcome = api_module.ZteTlsError(reason)
+            self.assertEqual(await self._validate(), reason)
+            self.assertTrue(FakeApi.instances[-1].closed)
+
+    async def test_validation_uses_the_pin_even_when_ca_verification_is_disabled(self):
+        fingerprint = "ab" * 32
+        self.assertIsNone(await config_flow._async_validate_login(
+            None, host="https://192.0.2.1", password="pw", verify_tls=False,
+            tls_fingerprint=fingerprint,
+        ))
+        self.assertEqual(FakeApi.instances[-1].kwargs["tls_fingerprint"], fingerprint)
+        self.assertFalse(FakeApi.instances[-1].kwargs["verify_tls"])
 
 
 def _flow(entry=None):
@@ -388,6 +405,18 @@ class ReauthTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("password", kwargs["options"])
         # The live login used the host from the stored entry.
         self.assertEqual(FakeApi.instances[0].kwargs["base_url"], "http://192.0.2.1")
+
+    async def test_reauth_prefers_options_pin_and_preserves_it_with_new_password(self):
+        self.entry.data.update(host="https://192.0.2.1", tls_fingerprint="cd" * 32)
+        self.entry.options["tls_fingerprint"] = "ab" * 32
+        flow = _flow(self.entry)
+        await flow.async_step_reauth_confirm({"password": "new"})
+        self.assertEqual(FakeApi.instances[-1].kwargs["tls_fingerprint"], "ab" * 32)
+        self.assertEqual(flow.async_update_reload_and_abort.call_args.kwargs["options"]["tls_fingerprint"], "ab" * 32)
+        self.entry.options["tls_fingerprint"] = ""
+        flow = _flow(self.entry)
+        await flow.async_step_reauth_confirm({"password": "new"})
+        self.assertEqual(FakeApi.instances[-1].kwargs["tls_fingerprint"], "")
 
 
 class TranslationTests(unittest.TestCase):

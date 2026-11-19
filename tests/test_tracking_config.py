@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from unittest.mock import patch
+from test_auth import api_module
 
 import voluptuous as vol
 
@@ -69,6 +70,8 @@ def load_flow():
     zte_api = types.ModuleType("zte_config_test.zte_api")
     zte_api.ZteAuthError = ZteAuthError
     zte_api.ZteRouterApi = ZteRouterApi
+    zte_api.ZteTlsError = api_module.ZteTlsError
+    zte_api.normalize_tls_fingerprint = api_module.normalize_tls_fingerprint
     package = types.ModuleType("zte_config_test")
     package.__path__ = [str(ROOT)]
     spec = importlib.util.spec_from_file_location("zte_config_test.config_flow", ROOT / "config_flow.py")
@@ -85,6 +88,57 @@ flow = load_flow()
 
 
 class TrackingConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fingerprint_setup_normalizes_and_stores_without_changing_http_defaults(self):
+        config = flow.ZteNgRouterConfigFlow()
+        form = await config.async_step_user()
+        values = form["data_schema"]({
+            "name": "Router", "host": "https://192.0.2.1", "password": "test",
+            "tls_fingerprint": ":".join(["AB"] * 32),
+        })
+        result = await config.async_step_user(values)
+        self.assertEqual(result["data"]["tls_fingerprint"], "ab" * 32)
+        self.assertFalse(result["data"]["verify_tls"])
+        values.update(host="http://192.0.2.1")
+        result = await config.async_step_user(values)
+        self.assertEqual(result["errors"], {"tls_fingerprint": "tls_fingerprint_requires_https"})
+        values["tls_fingerprint"] = ""
+        result = await config.async_step_user(values)
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"]["host"], "http://192.0.2.1")
+        self.assertNotIn("allow_insecure_http", result["data"])
+
+    async def test_invalid_pin_returns_field_error_and_is_not_saved(self):
+        config = flow.ZteNgRouterConfigFlow()
+        values = {"name": "Router", "host": "https://192.0.2.1", "password": "test",
+                  "verify_tls": True, "scan_interval": 60, "tls_fingerprint": "invalid"}
+        result = await config.async_step_user(values)
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"tls_fingerprint": "invalid_tls_fingerprint"})
+        options = flow.ZteNgRouterOptionsFlow(types.SimpleNamespace(data={}, options={}))
+        result = await options.async_step_init(values)
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"tls_fingerprint": "invalid_tls_fingerprint"})
+
+    async def test_options_can_clear_a_pin_stored_in_data_and_keep_verification_choice(self):
+        entry = types.SimpleNamespace(
+            data={"host": "https://192.0.2.1", "password": "old", "tls_fingerprint": "ab" * 32},
+            options={"verify_tls": True},
+        )
+        options = flow.ZteNgRouterOptionsFlow(entry)
+        form = await options.async_step_init()
+        values = form["data_schema"]({})
+        self.assertEqual(values["tls_fingerprint"], "ab" * 32)
+        # Updating unrelated options must not drop a pin from the original entry.
+        unchanged = await options.async_step_init({key: value for key, value in values.items()
+                                                   if key != "tls_fingerprint"})
+        self.assertEqual(unchanged["data"]["tls_fingerprint"], "ab" * 32)
+        values["tls_fingerprint"] = ""
+        cleared = await options.async_step_init(values)
+        self.assertEqual(cleared["data"]["tls_fingerprint"], "")
+        self.assertTrue(cleared["data"]["verify_tls"])
+        self.assertNotIn("password", cleared["data"])
+        self.assertEqual(entry.data["tls_fingerprint"], "ab" * 32)
+
     async def test_initial_schema_defaults_to_opt_out_and_persists_opt_in(self):
         config = flow.ZteNgRouterConfigFlow()
         form = await config.async_step_user()
@@ -138,6 +192,10 @@ class TrackingConfigTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("client_consider_home", labels)
                 self.assertEqual("sms_event_content" in labels, section == "options")
                 self.assertEqual("sms_legacy_preview" in labels, section == "options")
+                self.assertIn("tls_fingerprint", labels)
+                errors = translations[section]["error"]
+                self.assertIn("invalid_tls_fingerprint", errors)
+                self.assertIn("tls_fingerprint_requires_https", errors)
 
 
 if __name__ == "__main__":

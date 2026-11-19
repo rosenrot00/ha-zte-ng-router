@@ -7,10 +7,11 @@ from typing import Any
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .actions import async_run_router_action
 from .const import DOMAIN, SMS_COMPOSE_DEFAULT
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,7 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ZteActionButtonDef:
     key: str
-    name: str
     icon: str
     action: dict[str, Any]
     kind: str = "action"
@@ -28,7 +28,6 @@ class ZteActionButtonDef:
 BUTTON_DEFS: list[ZteActionButtonDef] = [
     ZteActionButtonDef(
         key="restart",
-        name="Restart",
         icon="mdi:restart",
         kind="action",
         action={
@@ -39,17 +38,16 @@ BUTTON_DEFS: list[ZteActionButtonDef] = [
     ),
     ZteActionButtonDef(
         key="send_sms",
-        name="Send SMS",
         icon="mdi:send",
         kind="send_sms",
         action={},
     ),
     ZteActionButtonDef(
-        key="check_firmware_update", name="Check Firmware Update", icon="mdi:update",
+        key="check_firmware_update", icon="mdi:update",
         kind="check_firmware", action={},
     ),
     ZteActionButtonDef(
-        key="start_firmware_update", name="Start Firmware Update", icon="mdi:cloud-download",
+        key="start_firmware_update", icon="mdi:cloud-download",
         kind="start_firmware", action={},
     ),
 ]
@@ -90,7 +88,7 @@ class ZteActionButton(CoordinatorEntity, ButtonEntity):
         self._api = api
         self._btn_def = btn_def
 
-        self._attr_name = btn_def.name
+        self._attr_translation_key = btn_def.key
         self._attr_icon = btn_def.icon
         self._attr_unique_id = f"{entry.entry_id}_{btn_def.key}"
         if btn_def.kind in {"check_firmware", "start_firmware"}:
@@ -120,13 +118,19 @@ class ZteActionButton(CoordinatorEntity, ButtonEntity):
         if self._btn_def.kind in {"check_firmware", "start_firmware"}:
             try:
                 if self._btn_def.kind == "check_firmware":
-                    ok = await self._api.async_check_firmware_update()
+                    action = self._api.async_check_firmware_update()
                 else:
-                    ok = await self._api.async_start_firmware_update()
+                    action = self._api.async_start_firmware_update()
+                await async_run_router_action(
+                    action,
+                    error_key="button_action_failed",
+                    placeholders={"name": self.name},
+                )
             except ValueError as exc:
-                raise HomeAssistantError(str(exc)) from exc
-            if not ok:
-                raise HomeAssistantError("Router rejected the firmware command; see integration logs")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="firmware_command_unavailable",
+                ) from exc
             await self.coordinator.async_request_refresh()
             return
 
@@ -134,24 +138,33 @@ class ZteActionButton(CoordinatorEntity, ButtonEntity):
             data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
             compose_value = str(data.get("sms_compose") or "")
             if compose_value.strip() == SMS_COMPOSE_DEFAULT:
-                _LOGGER.warning("Cannot send SMS, compose value is still default helper text")
-                return
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_sms",
+                )
             try:
                 number, message = self._api.parse_sms_compose_input(compose_value)
             except ValueError as exc:
-                _LOGGER.warning("Cannot send SMS, invalid compose value: %s", exc)
-                return
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_sms",
+                ) from exc
 
             try:
-                ok = await self._api.async_send_sms(number=number, message=message)
+                await async_run_router_action(
+                    self._api.async_send_sms(number=number, message=message),
+                    error_key="sms_send_failed",
+                )
             except ValueError as exc:
-                raise HomeAssistantError(str(exc)) from exc
-            if not ok:
-                _LOGGER.warning("ZTE action button failed: %s", self._btn_def.key)
-            else:
-                await self.coordinator.async_request_refresh()
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="sms_encryption_unavailable",
+                ) from exc
+            await self.coordinator.async_request_refresh()
             return
 
-        ok = await self._api.async_execute_action_def(self._btn_def.action)
-        if not ok:
-            _LOGGER.warning("ZTE action button failed: %s", self._btn_def.key)
+        await async_run_router_action(
+            self._api.async_execute_action_def(self._btn_def.action),
+            error_key="button_action_failed",
+            placeholders={"name": self.name},
+        )

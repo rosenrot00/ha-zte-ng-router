@@ -11,11 +11,13 @@ from homeassistant.util import dt as dt_util
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.event import async_call_later
 
+from .actions import async_run_router_action
 from .const import DOMAIN
 from .wifi import wifi_flag, wifi_master_state
 from .zte_api import ZteRouterApi
@@ -35,7 +37,6 @@ SAFE_SWITCH_FLAGS = {
 @dataclass(frozen=True)
 class ZteActionSwitchDef:
     key: str
-    name: str
     icon: str
     state_key: str
     on_value: str
@@ -48,7 +49,6 @@ class ZteActionSwitchDef:
 SWITCH_DEFS: list[ZteActionSwitchDef] = [
     ZteActionSwitchDef(
         key="odu_led",
-        name="LED",
         icon="mdi:led-on",
         state_key="switch",
         on_value="1",
@@ -68,7 +68,6 @@ SWITCH_DEFS: list[ZteActionSwitchDef] = [
     ),
     ZteActionSwitchDef(
         key="wifi_master",
-        name="WiFi",
         icon="mdi:wifi",
         state_key="wifi_onoff",
         on_value="1",
@@ -88,7 +87,6 @@ SWITCH_DEFS: list[ZteActionSwitchDef] = [
     ),
     ZteActionSwitchDef(
         key="wifi_main_2g",
-        name="WiFi 2 GHz",
         icon="mdi:wifi",
         state_key="disabled",
         # UCI uses disabled=0 (enabled) and disabled=1 (disabled)
@@ -108,7 +106,6 @@ SWITCH_DEFS: list[ZteActionSwitchDef] = [
     ),
     ZteActionSwitchDef(
         key="wifi_main_5g",
-        name="WiFi 5 GHz",
         icon="mdi:wifi",
         state_key="disabled",
         # UCI uses disabled=0 (enabled) and disabled=1 (disabled)
@@ -128,7 +125,6 @@ SWITCH_DEFS: list[ZteActionSwitchDef] = [
     ),
     ZteActionSwitchDef(
         key="mobile_data",
-        name="Mobile Data",
         icon="mdi:signal-cellular-3",
         state_key="enable",
         on_value="1",
@@ -191,7 +187,7 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
         self._api = api
         self._def = switch_def
 
-        self._attr_name = switch_def.name
+        self._attr_translation_key = switch_def.key
         self._attr_icon = switch_def.icon
         self._attr_unique_id = f"{entry.entry_id}_{switch_def.key}"
 
@@ -257,22 +253,24 @@ class ZteActionSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.info("Turning ON ZTE switch: %s", self._def.key)
         action = self._action_for_turn_on()
-        ok = await self._api.async_execute_action_def(action)
-        if ok:
-            if not self._apply_optimistic_state(action):
-                await self.coordinator.async_request_refresh()
-        else:
-            _LOGGER.warning("Failed to turn ON ZTE switch: %s", self._def.key)
+        await async_run_router_action(
+            self._api.async_execute_action_def(action),
+            error_key="switch_on_failed",
+            placeholders={"name": self.name},
+        )
+        if not self._apply_optimistic_state(action):
+            await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.info("Turning OFF ZTE switch: %s", self._def.key)
         action = self._action_for_turn_off()
-        ok = await self._api.async_execute_action_def(action)
-        if ok:
-            if not self._apply_optimistic_state(action):
-                await self.coordinator.async_request_refresh()
-        else:
-            _LOGGER.warning("Failed to turn OFF ZTE switch: %s", self._def.key)
+        await async_run_router_action(
+            self._api.async_execute_action_def(action),
+            error_key="switch_off_failed",
+            placeholders={"name": self.name},
+        )
+        if not self._apply_optimistic_state(action):
+            await self.coordinator.async_request_refresh()
 
     def _apply_optimistic_state(self, action: dict[str, Any]) -> bool:
         """Update HA state from a successful write without immediately polling."""
@@ -380,7 +378,7 @@ class ZtePausePollingSwitch(SwitchEntity):
         self._entry_id = entry.entry_id
         self._unsub_auto_off = None
 
-        self._attr_name = "Pause polling (5 min)"
+        self._attr_translation_key = "pause_polling"
         self._attr_icon = "mdi:pause-circle-outline"
         self._attr_unique_id = f"{entry.entry_id}_pause_polling"
 
@@ -491,7 +489,7 @@ class ZteCellLockSwitch(CoordinatorEntity, SwitchEntity):
         if kind not in ("4g", "5g"):
             raise ValueError("kind must be '4g' or '5g'")
 
-        self._attr_name = "Cell Lock 4G" if kind == "4g" else "Cell Lock 5G"
+        self._attr_translation_key = f"cell_lock_{kind}_enabled"
         self._attr_icon = "mdi:cellphone-lock"
         self._attr_unique_id = f"{entry.entry_id}_cell_lock_{kind}_enabled"
 
@@ -550,8 +548,11 @@ class ZteCellLockSwitch(CoordinatorEntity, SwitchEntity):
         # Resolve associated text entity and read its current value
         text_entity_id = await self._resolve_text_entity_id()
         if not text_entity_id:
-            _LOGGER.warning("Cell lock %s: text entity not found; cannot enable", self._kind)
-            return
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="cell_lock_text_missing",
+                translation_placeholders={"kind": self._kind.upper()},
+            )
 
         st = self.hass.states.get(text_entity_id)
         value = (st.state if st else "")
@@ -559,25 +560,34 @@ class ZteCellLockSwitch(CoordinatorEntity, SwitchEntity):
 
         try:
             if self._kind == "4g":
-                ok = await self._api.async_set_4g_cell_lock_enabled(True, value=value)
+                action = self._api.async_set_4g_cell_lock_enabled(True, value=value)
             else:
-                ok = await self._api.async_set_5g_cell_lock_enabled(True, value=value)
-        except Exception as e:
-            _LOGGER.warning("Failed to enable cell lock %s: %s", self._kind, e)
-            ok = False
+                action = self._api.async_set_5g_cell_lock_enabled(True, value=value)
+            await async_run_router_action(
+                action,
+                error_key="switch_on_failed",
+                placeholders={"name": self.name},
+            )
+        except ValueError as exc:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_cell_lock",
+                translation_placeholders={
+                    "kind": self._kind.upper(),
+                    "format": "PCI,EARFCN" if self._kind == "4g" else "PCI,ARFCN,BAND",
+                },
+            ) from exc
 
-        if ok:
-            await self.coordinator.async_request_refresh()
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        try:
-            if self._kind == "4g":
-                ok = await self._api.async_set_4g_cell_lock_enabled(False)
-            else:
-                ok = await self._api.async_set_5g_cell_lock_enabled(False)
-        except Exception as e:
-            _LOGGER.warning("Failed to disable cell lock %s: %s", self._kind, e)
-            ok = False
-
-        if ok:
-            await self.coordinator.async_request_refresh()
+        if self._kind == "4g":
+            action = self._api.async_set_4g_cell_lock_enabled(False)
+        else:
+            action = self._api.async_set_5g_cell_lock_enabled(False)
+        await async_run_router_action(
+            action,
+            error_key="switch_off_failed",
+            placeholders={"name": self.name},
+        )
+        await self.coordinator.async_request_refresh()

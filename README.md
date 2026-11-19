@@ -50,6 +50,13 @@ Feature availability depends on router model and firmware.
 
 If a feature is missing, please open an issue to report it.
 
+### Entity Names
+
+Entity names use Home Assistant's standard translation system, with English and
+German translations. Home Assistant adds the device name automatically. Existing
+entity IDs, unique IDs, custom names and enable/disable choices are preserved.
+Network client hostnames are not translated.
+
 ### Polling Groups
 
 - **Fast** (default 5 seconds): download/upload rates, connected-since timestamp,
@@ -151,6 +158,27 @@ reauthentication.
 ## Requirements
 
 - Local network connectivity between Home Assistant and the router IP
+
+## HTTP and HTTPS
+
+Use the router URL with the protocol its firmware supports. HTTP continues to
+work without an additional consent switch. HTTPS is already supported, and
+**Verify TLS certificate** retains its existing behavior.
+
+For a self-signed HTTPS certificate, optionally enter its **SHA-256 fingerprint**
+in setup or the integration options. Verify that fingerprint through a trusted,
+independent source before entering it. The field accepts 64 hexadecimal
+characters, with optional colons and upper/lowercase letters.
+
+A fingerprint takes precedence over **Verify TLS certificate** and checks the
+exact server certificate instead of its CA chain. It applies to the login check,
+reauthentication, UBUS, and GoForm. Pinned connections do not follow redirects;
+use the router's direct HTTPS URL. A certificate change is refused until you
+verify and update the fingerprint. No insecure retry or HTTP downgrade is made.
+
+Leave the fingerprint empty to use the existing verification setting; clearing
+it restores that setting. HTTP has no certificate, so clear any fingerprint when
+switching to HTTP. Existing entries need no migration or changes.
 
 ## Received SMS
 

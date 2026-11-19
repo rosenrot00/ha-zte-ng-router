@@ -8,11 +8,13 @@
           "host": "Router-URL",
           "password": "Router-Passwort",
           "verify_tls": "TLS-Zertifikat pruefen",
+          "tls_fingerprint": "SHA-256-Fingerprint des TLS-Zertifikats (optional)",
           "scan_interval": "Langsames Abfrageintervall (Sekunden)",
           "track_wifi_clients": "Netzwerkgeraete verfolgen (WLAN und LAN)",
           "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)"
         },
         "data_description": {
+          "tls_fingerprint": "Nur HTTPS. Fingerprint vorher unabhaengig pruefen. Doppelpunkte und Grossbuchstaben sind erlaubt. Hat Vorrang vor der Zertifikatspruefung; ohne Fingerprint gilt die Option TLS-Zertifikat pruefen.",
           "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Neue Tracker sind deaktiviert, bis du sie in den Entitaetseinstellungen aktivierst.",
           "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend. Standard 180 Sekunden; Fehler und Polling-Pausen setzen die Frist zurueck."
         }
@@ -28,7 +30,12 @@
     "error": {
       "invalid_scan_interval": "Das Abfrageintervall muss zwischen 5 und 3600 Sekunden liegen.",
       "invalid_auth": "Der Router hat das Passwort abgelehnt.",
-      "cannot_connect": "Anmeldung am Router fehlgeschlagen. Pruefe die Router-URL und die Erreichbarkeit."
+      "cannot_connect": "Anmeldung am Router fehlgeschlagen. Pruefe die Router-URL und die Erreichbarkeit.",
+      "invalid_tls_fingerprint": "SHA-256-Fingerprint mit 64 hexadezimalen Zeichen eingeben, optional durch Doppelpunkte getrennt.",
+      "tls_fingerprint_requires_https": "Ein Zertifikats-Fingerprint benoetigt eine https://-Router-URL. Fuer HTTP das Feld leeren.",
+      "tls_error": "TLS-Verbindung oder Zertifikatspruefung fehlgeschlagen. Router-Zertifikat und TLS-Einstellungen pruefen.",
+      "tls_fingerprint_mismatch": "Das Router-Zertifikat stimmt nicht mit dem Fingerprint ueberein. Vor einer Aenderung das Zertifikat pruefen.",
+      "tls_redirect": "Die gepinnte Verbindung lieferte eine Weiterleitung. Direkte HTTPS-URL eingeben; mit Fingerprint werden keine Weiterleitungen verfolgt."
     },
     "abort": {
       "already_configured": "Dieser Router ist bereits eingerichtet.",
@@ -43,6 +50,7 @@
           "host": "Router-URL",
           "password": "Neues Router-Passwort (leer lassen zum Beibehalten)",
           "verify_tls": "TLS-Zertifikat pruefen",
+          "tls_fingerprint": "SHA-256-Fingerprint des TLS-Zertifikats (optional)",
           "scan_interval": "Langsames Abfrageintervall (Sekunden)",
           "track_wifi_clients": "Netzwerkgeraete verfolgen (WLAN und LAN)",
           "client_consider_home": "Abwesenheitsfrist fuer Netzwerkgeraete (Sekunden)",
@@ -50,11 +58,331 @@
           "sms_legacy_preview": "SMS-Vorschau im Sensor der letzten SMS wiederherstellen"
         },
         "data_description": {
+          "tls_fingerprint": "Nur HTTPS. Hat Vorrang vor der Zertifikatspruefung. Nach dem Leeren gilt wieder TLS-Zertifikat pruefen. Nach einem Zertifikatswechsel den neuen Fingerprint unabhaengig pruefen.",
           "track_wifi_clients": "WLAN- und LAN-Geraete beim langsamen Polling ausschliesslich lesen. Gewuenschte Tracker unter Einstellungen > Geraete & Dienste > Entitaeten aktivieren; deaktivierte Entitaeten einblenden.",
           "client_consider_home": "Bestaetigte Abwesenheit bis zur Meldung als abwesend (0-3600 Sekunden). Fehler und Polling-Pausen setzen die Frist zurueck.",
           "sms_event_content": "Standardmaessig aus. Home Assistant kann die sensiblen Daten im Ereignis speichern.",
           "sms_legacy_preview": "Standardmaessig aus. Stellt den bisherigen Zustand und die Attribute fuer bestehende Automationen wieder her. Nummer und Text sind in der Entitaet sichtbar und koennen gespeichert werden."
         }
+      }
+    },
+    "error": {
+      "invalid_tls_fingerprint": "SHA-256-Fingerprint mit 64 hexadezimalen Zeichen eingeben, optional durch Doppelpunkte getrennt.",
+      "tls_fingerprint_requires_https": "Ein Zertifikats-Fingerprint benoetigt eine https://-Router-URL. Fuer HTTP das Feld leeren."
+    }
+  },
+  "exceptions": {
+    "switch_on_failed": {
+      "message": "{name} konnte nicht eingeschaltet werden. Die Routeraktion ist fehlgeschlagen oder konnte nicht bestaetigt werden."
+    },
+    "switch_off_failed": {
+      "message": "{name} konnte nicht ausgeschaltet werden. Die Routeraktion ist fehlgeschlagen oder konnte nicht bestaetigt werden."
+    },
+    "button_action_failed": {
+      "message": "{name} konnte nicht ausgefuehrt werden. Die Routeraktion ist fehlgeschlagen oder konnte nicht bestaetigt werden."
+    },
+    "cell_lock_text_missing": {
+      "message": "Die Eingabeentitaet fuer den {kind}-Cell-Lock fehlt. Aktiviere die zugehoerige Textentitaet, bevor du den Cell-Lock einschaltest."
+    },
+    "invalid_cell_lock": {
+      "message": "Gib gueltige Werte fuer den {kind}-Cell-Lock im Format {format} in die zugehoerige Textentitaet ein."
+    },
+    "invalid_sms": {
+      "message": "Gib eine gueltige Zielnummer und eine nicht leere Nachricht im Format Nummer,Nachricht in die SMS-Textentitaet ein."
+    },
+    "sms_send_failed": {
+      "message": "Der SMS-Versand ist fehlgeschlagen oder konnte nicht bestaetigt werden. Pruefe den Router vor einem erneuten Versuch, um doppelte Nachrichten zu vermeiden."
+    },
+    "sms_encryption_unavailable": {
+      "message": "Die SMS-Verschluesselung ist noch nicht bereit oder konnte fuer diesen Router nicht ermittelt werden."
+    },
+    "firmware_command_unavailable": {
+      "message": "Der Firmwarebefehl wird nicht unterstuetzt oder ist im aktuellen Updatestatus nicht erlaubt. Aktualisiere den Routerstatus vor einem erneuten Versuch."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "network_provider": {
+        "name": "Netzbetreiber"
+      },
+      "connection_type": {
+        "name": "Verbindungstyp"
+      },
+      "wifi_onoff": {
+        "name": "WLAN aktiviert"
+      },
+      "main2g_ssid": {
+        "name": "WLAN-SSID 2,4 GHz"
+      },
+      "main5g_ssid": {
+        "name": "WLAN-SSID 5 GHz"
+      },
+      "signalbar": {
+        "name": "Signalbalken"
+      },
+      "rmcc": {
+        "name": "RMCC"
+      },
+      "rmnc": {
+        "name": "RMNC"
+      },
+      "nr_active_band": {
+        "name": "Aktives NR-Band"
+      },
+      "lte_primary_band": {
+        "name": "Prim\u00e4res LTE-Band"
+      },
+      "nr5g_cell_id": {
+        "name": "NR5G-Zell-ID"
+      },
+      "lac_code": {
+        "name": "LAC-Code"
+      },
+      "lte_band_lock": {
+        "name": "LTE-Bandsperre"
+      },
+      "gw_band_lock": {
+        "name": "GW-Bandsperre"
+      },
+      "bands_summary": {
+        "name": "B\u00e4nder"
+      },
+      "total_bandwidth": {
+        "name": "Gesamtbandbreite"
+      },
+      "lte_pci": {
+        "name": "LTE PCI"
+      },
+      "lte_earfcn": {
+        "name": "LTE EARFCN"
+      },
+      "lte_rsrp": {
+        "name": "LTE RSRP"
+      },
+      "lte_rsrq": {
+        "name": "LTE RSRQ"
+      },
+      "lte_sinr": {
+        "name": "LTE SINR"
+      },
+      "lte_rssi": {
+        "name": "LTE RSSI"
+      },
+      "nr_pci": {
+        "name": "NR PCI"
+      },
+      "nr_arfcn": {
+        "name": "NR ARFCN"
+      },
+      "nr_rsrp": {
+        "name": "NR RSRP"
+      },
+      "nr_rsrq": {
+        "name": "NR RSRQ"
+      },
+      "nr_sinr": {
+        "name": "NR SINR"
+      },
+      "nr_rssi": {
+        "name": "NR RSSI"
+      },
+      "wan_ipv4": {
+        "name": "WAN IPv4"
+      },
+      "wan_ipv6": {
+        "name": "WAN IPv6"
+      },
+      "wan_status": {
+        "name": "WAN-Status"
+      },
+      "wan_link_state": {
+        "name": "WAN-Linkstatus"
+      },
+      "modem_main_state": {
+        "name": "Modem-Hauptstatus"
+      },
+      "radio_off": {
+        "name": "Funk deaktiviert"
+      },
+      "hightemp_datalimit_status": {
+        "name": "Temperaturbedingte Datenbegrenzung"
+      },
+      "5g_modem_temperature": {
+        "name": "5G-Modemtemperatur"
+      },
+      "modem_temperature": {
+        "name": "Modemtemperatur"
+      },
+      "pa_temp_level": {
+        "name": "PA-Temperaturstufe"
+      },
+      "tj_temp_level": {
+        "name": "TJ-Temperaturstufe"
+      },
+      "connected_lan_devices": {
+        "name": "Verbundene LAN-Ger\u00e4te"
+      },
+      "connected_wifi_devices": {
+        "name": "Verbundene WLAN-Ger\u00e4te"
+      },
+      "download_rate": {
+        "name": "Downloadrate"
+      },
+      "upload_rate": {
+        "name": "Uploadrate"
+      },
+      "monthly_download_mb": {
+        "name": "Monatlicher Download"
+      },
+      "monthly_upload_mb": {
+        "name": "Monatlicher Upload"
+      },
+      "daily_download": {
+        "name": "T\u00e4glicher Download"
+      },
+      "daily_upload": {
+        "name": "T\u00e4glicher Upload"
+      },
+      "data_limit_enabled": {
+        "name": "Datenlimit aktiviert"
+      },
+      "data_limit_type": {
+        "name": "Art des Datenlimits"
+      },
+      "data_limit_value": {
+        "name": "Grenzwert des Datenlimits"
+      },
+      "data_limit_warning_percent": {
+        "name": "Warnschwelle des Datenlimits"
+      },
+      "data_limit_exceeded": {
+        "name": "Datenlimit \u00fcberschritten"
+      },
+      "traffic_auto_reset": {
+        "name": "Verbrauch automatisch zur\u00fccksetzen"
+      },
+      "traffic_reset_day": {
+        "name": "Tag der Verbrauchsr\u00fccksetzung"
+      },
+      "rx_packet_errors": {
+        "name": "Fehlerhafte Empfangspakete"
+      },
+      "tx_packet_errors": {
+        "name": "Fehlerhafte Sendepakete"
+      },
+      "rx_packet_drops": {
+        "name": "Verworfene Empfangspakete"
+      },
+      "tx_packet_drops": {
+        "name": "Verworfene Sendepakete"
+      },
+      "sms_count": {
+        "name": "SMS-Anzahl"
+      },
+      "sms_unread_total": {
+        "name": "Ungelesene SMS"
+      },
+      "sms_nv_total": {
+        "name": "SMS-Ger\u00e4tespeicher gesamt"
+      },
+      "sms_sim_total": {
+        "name": "SMS-SIM-Speicher gesamt"
+      },
+      "sms_nv_used_total": {
+        "name": "SMS-Ger\u00e4tespeicher belegt"
+      },
+      "sms_latest": {
+        "name": "Letzte SMS"
+      },
+      "connected_time": {
+        "name": "Verbunden seit"
+      },
+      "hardware_version": {
+        "name": "Hardwareversion"
+      },
+      "wa_inner_version": {
+        "name": "Firmwareversion"
+      },
+      "cpu_usage": {
+        "name": "CPU-Auslastung"
+      },
+      "ram_usage": {
+        "name": "RAM-Auslastung"
+      },
+      "cpu_temp": {
+        "name": "CPU-Temperatur"
+      },
+      "uptime": {
+        "name": "Gestartet am"
+      },
+      "firmware_update_status": {
+        "name": "Firmware-Updatestatus"
+      },
+      "firmware_latest_version": {
+        "name": "Neueste Firmwareversion"
+      },
+      "firmware_download_progress": {
+        "name": "Firmware-Downloadfortschritt"
+      },
+      "gnss_latitude": {
+        "name": "GNSS-Breitengrad"
+      },
+      "gnss_longitude": {
+        "name": "GNSS-L\u00e4ngengrad"
+      },
+      "gnss_fix": {
+        "name": "GNSS-Fix"
+      }
+    },
+    "switch": {
+      "odu_led": {
+        "name": "LED"
+      },
+      "wifi_master": {
+        "name": "WLAN"
+      },
+      "wifi_main_2g": {
+        "name": "WLAN 2,4 GHz"
+      },
+      "wifi_main_5g": {
+        "name": "WLAN 5 GHz"
+      },
+      "mobile_data": {
+        "name": "Mobile Daten"
+      },
+      "pause_polling": {
+        "name": "Abfragen pausieren (5 Min.)"
+      },
+      "cell_lock_4g_enabled": {
+        "name": "4G-Zellsperre"
+      },
+      "cell_lock_5g_enabled": {
+        "name": "5G-Zellsperre"
+      }
+    },
+    "button": {
+      "restart": {
+        "name": "Neu starten"
+      },
+      "send_sms": {
+        "name": "SMS senden"
+      },
+      "check_firmware_update": {
+        "name": "Nach Firmwareupdates suchen"
+      },
+      "start_firmware_update": {
+        "name": "Firmwareupdate starten"
+      }
+    },
+    "text": {
+      "cell_lock_4g_text": {
+        "name": "4G-Zellsperre"
+      },
+      "cell_lock_5g_text": {
+        "name": "5G-Zellsperre"
+      },
+      "sms_compose_text": {
+        "name": "SMS verfassen"
       }
     }
   }

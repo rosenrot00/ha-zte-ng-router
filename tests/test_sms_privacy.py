@@ -7,6 +7,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from ha_entities import Entity
 ROOT = Path(__file__).resolve().parents[1] / "custom_components/zte_ng_router"
 
 
@@ -28,7 +29,7 @@ def _load_sensors():
 
     symbols = {
         "homeassistant.components.sensor": {
-            "SensorEntity": type("SensorEntity", (), {}),
+            "SensorEntity": Entity,
             "SensorDeviceClass": types.SimpleNamespace(
                 TEMPERATURE="temperature", DATA_RATE="data_rate", DATA_SIZE="data_size",
                 TIMESTAMP="timestamp",
@@ -87,7 +88,7 @@ class SmsEntityPrivacyTests(unittest.TestCase):
                         "capacity": {"sms_nv_rev_total": "3"}}}
         coordinator = types.SimpleNamespace(data=data)
         return sensors.ZteNgRouterSensor(
-            coordinator, "entry", "Router", "sms_latest", "Latest SMS", None, None, None,
+            coordinator, "entry", "Router", "sms_latest", None, None, None,
             sms_legacy_preview=legacy,
         )
 
