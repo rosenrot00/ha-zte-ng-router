@@ -25,6 +25,19 @@
         "data": {
           "password": "Router-Passwort"
         }
+      },
+      "reconfigure": {
+        "title": "Eintrag neu konfigurieren: {name}",
+        "description": "Adresse oder Passwort des Routers aendern. Die neue Adresse muss zum selben Router gehoeren.",
+        "data": {
+          "host": "Router-URL",
+          "password": "Neues Router-Passwort (leer lassen, um das aktuelle zu behalten)",
+          "verify_tls": "TLS-Zertifikat pruefen",
+          "tls_fingerprint": "SHA-256-Fingerabdruck des TLS-Zertifikats (optional)"
+        },
+        "data_description": {
+          "tls_fingerprint": "Nur HTTPS. Gib einen unabhaengig verifizierten Fingerabdruck ein. Doppelpunkte und Grossbuchstaben sind erlaubt. Leer lassen, um die Einstellung 'TLS-Zertifikat pruefen' zu verwenden."
+        }
       }
     },
     "error": {
@@ -38,8 +51,10 @@
       "tls_redirect": "Die gepinnte Verbindung lieferte eine Weiterleitung. Direkte HTTPS-URL eingeben; mit Fingerprint werden keine Weiterleitungen verfolgt."
     },
     "abort": {
-      "already_configured": "Dieser Router ist bereits eingerichtet.",
-      "reauth_successful": "Die erneute Authentifizierung war erfolgreich."
+      "already_configured": "Dieser Router ist bereits konfiguriert.",
+      "reauth_successful": "Die erneute Authentifizierung war erfolgreich.",
+      "reconfigure_successful": "Die Router-Einstellungen wurden aktualisiert.",
+      "wrong_device": "Diese Adresse gehoert zu einem anderen Router. Fuege stattdessen einen neuen Integrationseintrag hinzu."
     }
   },
   "options": {
@@ -130,7 +145,7 @@
         "name": "Aktives NR-Band"
       },
       "lte_primary_band": {
-        "name": "Prim\u00e4res LTE-Band"
+        "name": "Primäres LTE-Band"
       },
       "nr5g_cell_id": {
         "name": "NR5G-Zell-ID"
@@ -145,7 +160,7 @@
         "name": "GW-Bandsperre"
       },
       "bands_summary": {
-        "name": "B\u00e4nder"
+        "name": "Bänder"
       },
       "total_bandwidth": {
         "name": "Gesamtbandbreite"
@@ -220,10 +235,10 @@
         "name": "TJ-Temperaturstufe"
       },
       "connected_lan_devices": {
-        "name": "Verbundene LAN-Ger\u00e4te"
+        "name": "Verbundene LAN-Geräte"
       },
       "connected_wifi_devices": {
-        "name": "Verbundene WLAN-Ger\u00e4te"
+        "name": "Verbundene WLAN-Geräte"
       },
       "download_rate": {
         "name": "Downloadrate"
@@ -238,10 +253,10 @@
         "name": "Monatlicher Upload"
       },
       "daily_download": {
-        "name": "T\u00e4glicher Download"
+        "name": "Täglicher Download"
       },
       "daily_upload": {
-        "name": "T\u00e4glicher Upload"
+        "name": "Täglicher Upload"
       },
       "data_limit_enabled": {
         "name": "Datenlimit aktiviert"
@@ -256,13 +271,13 @@
         "name": "Warnschwelle des Datenlimits"
       },
       "data_limit_exceeded": {
-        "name": "Datenlimit \u00fcberschritten"
+        "name": "Datenlimit überschritten"
       },
       "traffic_auto_reset": {
-        "name": "Verbrauch automatisch zur\u00fccksetzen"
+        "name": "Verbrauch automatisch zurücksetzen"
       },
       "traffic_reset_day": {
-        "name": "Tag der Verbrauchsr\u00fccksetzung"
+        "name": "Tag der Verbrauchsrücksetzung"
       },
       "rx_packet_errors": {
         "name": "Fehlerhafte Empfangspakete"
@@ -283,13 +298,13 @@
         "name": "Ungelesene SMS"
       },
       "sms_nv_total": {
-        "name": "SMS-Ger\u00e4tespeicher gesamt"
+        "name": "SMS-Gerätespeicher gesamt"
       },
       "sms_sim_total": {
         "name": "SMS-SIM-Speicher gesamt"
       },
       "sms_nv_used_total": {
-        "name": "SMS-Ger\u00e4tespeicher belegt"
+        "name": "SMS-Gerätespeicher belegt"
       },
       "sms_latest": {
         "name": "Letzte SMS"
@@ -328,7 +343,7 @@
         "name": "GNSS-Breitengrad"
       },
       "gnss_longitude": {
-        "name": "GNSS-L\u00e4ngengrad"
+        "name": "GNSS-Längengrad"
       },
       "gnss_fix": {
         "name": "GNSS-Fix"

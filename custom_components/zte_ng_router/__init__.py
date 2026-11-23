@@ -29,6 +29,7 @@ from .const import (
     CONF_SMS_EVENT_CONTENT,
 )
 from .device_info import async_update_device_info
+from .identity import device_identifier_from_data, entry_unique_id, should_migrate_unique_id
 from .sms_events import EVENT_SMS_RECEIVED, collect_new_incoming_sms, sms_event_data
 from .zte_api import ZteAuthError, ZteRouterApi
 
@@ -225,6 +226,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
         await coordinator_fast.async_config_entry_first_refresh()
 
+        _async_migrate_entry_identity(hass, entry, coordinator.data)
+
         store.update(
             {
                 "api": api,
@@ -247,6 +250,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             hass.data[DOMAIN].pop(entry.entry_id, None)
         raise
+
+
+def _async_migrate_entry_identity(
+    hass: HomeAssistant, entry: ConfigEntry, poll_data: dict[str, Any]
+) -> None:
+    """Replace a legacy address-based unique ID with the router's own MAC.
+
+    Entity unique IDs and the device identifier are based on the entry ID, so
+    this changes only duplicate detection - entity IDs, areas and statistics
+    are preserved. Entries on firmware without a MAC keep their old ID.
+    """
+    identifier = device_identifier_from_data(poll_data)
+    if identifier is None or not should_migrate_unique_id(entry.unique_id, identifier):
+        return
+    hass.config_entries.async_update_entry(entry, unique_id=entry_unique_id(identifier))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

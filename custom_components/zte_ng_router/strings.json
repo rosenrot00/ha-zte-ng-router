@@ -25,6 +25,19 @@
         "data": {
           "password": "Router password"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure {name}",
+        "description": "Change the router address or password. The new address must belong to the same router.",
+        "data": {
+          "host": "Router URL",
+          "password": "New router password (leave empty to keep current)",
+          "verify_tls": "Verify TLS certificate",
+          "tls_fingerprint": "TLS certificate SHA-256 fingerprint (optional)"
+        },
+        "data_description": {
+          "tls_fingerprint": "HTTPS only. Enter a fingerprint verified independently. Colons and uppercase are accepted. Leave empty to use the Verify TLS certificate setting."
+        }
       }
     },
     "error": {
@@ -39,7 +52,9 @@
     },
     "abort": {
       "already_configured": "This router is already configured.",
-      "reauth_successful": "Reauthentication was successful."
+      "reauth_successful": "Reauthentication was successful.",
+      "reconfigure_successful": "The router settings were updated.",
+      "wrong_device": "This address belongs to a different router. Add a new integration entry instead of reconfiguring this one."
     }
   },
   "options": {

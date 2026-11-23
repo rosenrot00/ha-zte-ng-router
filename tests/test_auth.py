@@ -279,13 +279,13 @@ class ValidateLoginTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_success_returns_none_and_closes_the_api(self):
-        self.assertIsNone(await self._validate())
+        self.assertEqual(await self._validate(), (None, None))
         self.assertTrue(FakeApi.instances[0].closed)
         self.assertTrue(FakeApi.instances[0].logged_out)
 
     async def test_rejected_password_maps_to_invalid_auth(self):
         FakeApi.outcome = ZteAuthError("rejected")
-        self.assertEqual(await self._validate(), "invalid_auth")
+        self.assertEqual(await self._validate(), ("invalid_auth", None))
         self.assertTrue(FakeApi.instances[0].closed)
         self.assertFalse(FakeApi.instances[0].logged_out)
 
@@ -293,20 +293,20 @@ class ValidateLoginTests(unittest.IsolatedAsyncioTestCase):
         for failure in (RuntimeError("x"), OSError("x"), TimeoutError()):
             with self.subTest(failure=type(failure).__name__):
                 FakeApi.outcome = failure
-                self.assertEqual(await self._validate(), "cannot_connect")
+                self.assertEqual(await self._validate(), ("cannot_connect", None))
 
     async def test_tls_failures_are_not_mapped_to_password_errors(self):
         for reason in ("tls_error", "tls_fingerprint_mismatch", "tls_redirect"):
             FakeApi.outcome = api_module.ZteTlsError(reason)
-            self.assertEqual(await self._validate(), reason)
+            self.assertEqual(await self._validate(), (reason, None))
             self.assertTrue(FakeApi.instances[-1].closed)
 
     async def test_validation_uses_the_pin_even_when_ca_verification_is_disabled(self):
         fingerprint = "ab" * 32
-        self.assertIsNone(await config_flow._async_validate_login(
+        self.assertEqual(await config_flow._async_validate_login(
             None, host="https://192.0.2.1", password="pw", verify_tls=False,
             tls_fingerprint=fingerprint,
-        ))
+        ), (None, None))
         self.assertEqual(FakeApi.instances[-1].kwargs["tls_fingerprint"], fingerprint)
         self.assertFalse(FakeApi.instances[-1].kwargs["verify_tls"])
 
