@@ -205,9 +205,7 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return ZteNgRouterOptionsFlow(config_entry)
 
 
-class ZteNgRouterOptionsFlow(
-    getattr(config_entries, "OptionsFlowWithReload", config_entries.OptionsFlow)
-):
+class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):
     """Options flow for adjusting settings after initial setup."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:

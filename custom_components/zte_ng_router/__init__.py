@@ -221,6 +221,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         )
 
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
     try:
         await coordinator.async_config_entry_first_refresh()
         await coordinator_fast.async_config_entry_first_refresh()
@@ -267,3 +269,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if callable(schedule_polling):
             schedule_polling()
     return unload_ok
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the config entry after its options change.
+
+    The coordinator reads host, credentials and polling intervals only during
+    setup, so changed options need a reload to take effect immediately.
+    """
+    await hass.config_entries.async_reload(entry.entry_id)
