@@ -61,7 +61,9 @@ class ZteNgRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for ZTE NG Router."""
 
     VERSION = 1
-    options_flow_reloads = True
+    # Reloading is driven by the update listener in __init__.py, so Home Assistant
+    # must not reload again after the options flow finishes.
+    options_flow_reloads = False
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle the initial step where the user enters basic config."""

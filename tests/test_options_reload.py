@@ -56,10 +56,11 @@ class OptionsReloadTests(unittest.TestCase):
         self.assertEqual(ast.unparse(args[0]), "entry.entry_id")
 
     def test_options_flow_does_not_reload_twice(self):
-        """The options flow must not use OptionsFlowWithReload in parallel."""
+        """The options flow must not trigger a second reload via HA."""
         source = _module_source("config_flow.py")
         self.assertNotIn("OptionsFlowWithReload", source)
         self.assertIn("class ZteNgRouterOptionsFlow(config_entries.OptionsFlow):", source)
+        self.assertIn("options_flow_reloads = False", source)
 
 
 if __name__ == "__main__":
